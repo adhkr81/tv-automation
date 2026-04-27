@@ -6,23 +6,54 @@ import { testConfig } from "../config/testConfig.js";
 const AUTH_FILE = "playwright/.auth/user.json";
 
 test("capture authenticated session", async ({ page }) => {
+  const selectorList = (selectorString) =>
+    selectorString
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+  const waitForFirstVisible = async (selectors, timeoutMs, label) => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      for (const selector of selectors) {
+        const locator = page.locator(selector).first();
+        const visible = await locator.isVisible().catch(() => false);
+        if (visible) {
+          return locator;
+        }
+      }
+      await page.waitForTimeout(250);
+    }
+
+    throw new Error(`${label} was not visible. Tried: ${selectors.join(", ")}`);
+  };
+
   await page.goto(testConfig.baseUrl, {
     waitUntil: "domcontentloaded",
     timeout: 60000,
   });
 
-  const usernameSelectors = testConfig.selectors.usernameInput
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const passwordSelectors = testConfig.selectors.passwordInput
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const loginButtonSelectors = testConfig.selectors.loginButton
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  // Wait for login form to load
+  await page.waitForTimeout(2000);
+
+  const usernameSelectors = selectorList(testConfig.selectors.usernameInput);
+  const passwordSelectors = selectorList(testConfig.selectors.passwordInput);
+  const loginButtonSelectors = selectorList(testConfig.selectors.loginButton);
+
+  // Automatically fill username and password
+  if (testConfig.credentials?.username) {
+    const usernameInput = await waitForFirstVisible(usernameSelectors, 10000, "Username input");
+    await usernameInput.fill(testConfig.credentials.username);
+  }
+  if (testConfig.credentials?.password) {
+    const passwordInput = await waitForFirstVisible(passwordSelectors, 10000, "Password input");
+    await passwordInput.fill(testConfig.credentials.password);
+  }
+  
+  // Click login button to submit credentials
+  const loginButton = await waitForFirstVisible(loginButtonSelectors, 10000, "Login button");
+  await loginButton.click();
+
   const pinSelectors = (
     testConfig.selectors.pinInput ||
     'input[name*="pin" i], input[id*="pin" i], input[autocomplete="one-time-code"], input[inputmode="numeric"]'

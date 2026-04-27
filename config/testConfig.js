@@ -4,11 +4,17 @@ export const testConfig = {
 
   // Starter selectors for the RMUS login page.
   selectors: {
-    usernameInput: 'input[name="id"], input[type="text"]',
-    passwordInput: 'input[name="password"], input[type="password"]',
-    loginButton: 'button[type="submit"], input[type="submit"], button:has-text("Log-In")',
+    usernameInput: '#userId',
+    passwordInput: '#userPW', 
+    loginButton: '#lbLogin, input[name="lbLogin"], input[type="submit"][value="LOGIN"]',
     pinInput:
       'input[name*="pin" i], input[id*="pin" i], input[autocomplete="one-time-code"], input[inputmode="numeric"]',
+  },
+
+  // Login credentials (username and password will be filled automatically, PIN entered manually)
+  credentials: {
+    username: "SEA_SNACC",
+    password: "samsung1@@",
   },
 
   browser: {
