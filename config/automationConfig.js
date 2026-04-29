@@ -28,4 +28,33 @@ export const automationConfig = {
     medium: { min: 2000, max: 4000 },
     long: { min: 5000, max: 8000 },
   },
+
+  logging: {
+    // Console error substrings to suppress (matched against msg.text())
+    ignoreConsoleErrors: [
+      "ResizeObserver loop",
+      "Non-Error promise rejection",
+    ],
+    // Page error substrings to suppress (matched against exception.message)
+    ignorePageErrors: [],
+    // requestfailed failure reason substrings to suppress
+    ignoreRequestFailureErrors: [
+      "net::ERR_ABORTED",
+      "net::ERR_BLOCKED_BY_CLIENT",
+    ],
+  },
+
+  network: {
+    // Set to true to silence all requestfailed log entries
+    suppressRequestFailedLogs: false,
+    // URL substrings for requests whose failures should not be logged
+    ignoreFailedRequests: [
+      "medallia",
+      "kampyle",
+      "newrelic",
+      "appmeasurement",
+      "analytics",
+      "doubleclick",
+    ],
+  },
 };

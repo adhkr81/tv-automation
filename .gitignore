@@ -21,6 +21,10 @@ playwright/.auth/
 .DS_Store
 Thumbs.db
 
+# Captures (screenshots from topic runs)
+captures/
+
 # Logs
+logs/
 *.log
 npm-debug.log*
