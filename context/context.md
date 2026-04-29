@@ -1,5 +1,9 @@
 # Local Web Dashboard Plan (TV Automation)
 
+Related operational docs:
+
+- `context/samsung-remote-setup.md` - setup and usage for Samsung package remote + RM capture flow
+
 This document describes a proposed simple UI for the RMUS topic capture system: a **local web dashboard** that controls runs, streams logs, and shows screenshots—without Electron or a heavy frontend build.
 
 ## Goals

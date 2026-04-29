@@ -2,16 +2,108 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import dotenv from "dotenv";
 import { chromium } from "playwright";
+import samsungTvRemotePkg from "samsung-tv-remote";
 import { automationConfig } from "../config/automationConfig.js";
 import { loginAndWaitAuthenticated } from "../lib/loginFlow.js";
 import { reset, topics } from "./topics.mjs";
+
+dotenv.config();
+
+const { SamsungTvRemote } = samsungTvRemotePkg;
 
 const outputRoot = path.join(process.cwd(), "captures");
 const runDir = outputRoot;
 const logsDir = path.join(process.cwd(), "logs");
 const runStamp = new Date().toISOString().replace(/[:.]/g, "-");
 const runLogPath = path.join(logsDir, `capture-run-${runStamp}.log`);
+
+const RM_TO_SAMSUNG_KEY = {
+  "?": "KEY_CONTENTS",
+  "◀": "KEY_LEFT",
+  "▶": "KEY_RIGHT",
+  "▲": "KEY_UP",
+  "▼": "KEY_DOWN",
+  ENTER: "KEY_ENTER",
+  RETURN: "KEY_RETURN",
+  EXIT: "KEY_EXIT",
+  MENU: "KEY_MENU",
+  INFO: "KEY_INFO",
+  TOOLS: "KEY_TOOLS",
+  POWER: "KEY_POWER",
+  INPUT: "KEY_SOURCE",
+  MUTE: "KEY_MUTE",
+  "VOL UP": "KEY_VOLUP",
+  "VOL DOWN": "KEY_VOLDOWN",
+  "TUNNING/CH UP": "KEY_CHUP",
+  "TUNNING/CH DOWN": "KEY_CHDOWN",
+  GUIDE: "KEY_GUIDE",
+  HOME: "KEY_HOME",
+  SEARCH: "KEY_SEARCH",
+  CONTENTS: "KEY_CONTENTS",
+  A: "KEY_RED",
+  B: "KEY_GREEN",
+  C: "KEY_YELLOW",
+  D: "KEY_CYAN",
+};
+
+function normalizeActionKeyName(value) {
+  return String(value || "").trim().toUpperCase();
+}
+
+function resolveSamsungKey(actionKey) {
+  const normalized = normalizeActionKeyName(actionKey);
+  if (!normalized) return null;
+  if (normalized.startsWith("KEY_")) return normalized;
+  return RM_TO_SAMSUNG_KEY[normalized] || null;
+}
+
+function useSamsungRemoteDriver() {
+  const flag = (process.env.USE_SAMSUNG_REMOTE || "").trim().toLowerCase();
+  return ["1", "true", "yes", "y", "on"].includes(flag);
+}
+
+function createSamsungRemoteController() {
+  const ip = (process.env.SAMSUNG_TV_IP || "").trim();
+  if (!ip) {
+    throw new Error("USE_SAMSUNG_REMOTE is enabled, but SAMSUNG_TV_IP is missing.");
+  }
+
+  const portRaw = (process.env.SAMSUNG_TV_PORT || "").trim();
+  const timeoutRaw = (process.env.SAMSUNG_TV_TIMEOUT_MS || "").trim();
+  const keysDelayRaw = (process.env.SAMSUNG_TV_KEYS_DELAY_MS || "").trim();
+
+  const options = {
+    ip,
+    name: (process.env.SAMSUNG_REMOTE_NAME || "TV Automation").trim(),
+  };
+
+  if (portRaw) options.port = Number(portRaw);
+  if (timeoutRaw) options.timeout = Number(timeoutRaw);
+  if (keysDelayRaw) options.keysDelay = Number(keysDelayRaw);
+
+  const remote = new SamsungTvRemote(options);
+  let hasSentKey = false;
+
+  return {
+    async pressKey(actionKey) {
+      const samsungKey = resolveSamsungKey(actionKey);
+      if (!samsungKey) {
+        throw new Error(
+          `No Samsung key mapping for "${actionKey}". Use KEY_* in topics or add a map entry.`,
+        );
+      }
+      await remote.sendKey(samsungKey);
+      hasSentKey = true;
+    },
+    disconnect() {
+      if (hasSentKey) {
+        remote.disconnect();
+      }
+    },
+  };
+}
 
 function logLine(message) {
   const ts = new Date().toISOString();
@@ -44,7 +136,12 @@ async function ensureRemoteMapReady(page, rl) {
   await page.locator("map#remote_control_TV_US area").first().waitFor({ state: "attached", timeout: 60000 });
 }
 
-async function pressRemoteKey(page, keyName) {
+async function pressRemoteKey(page, remoteController, keyName) {
+  if (remoteController) {
+    await remoteController.pressKey(keyName);
+    return;
+  }
+
   const button = page.locator(`map#remote_control_TV_US area[alt="${keyName}"]`).first();
   await button.waitFor({ state: "attached", timeout: 15000 });
   await button.evaluate((el) => el.click());
@@ -239,11 +336,11 @@ function toStepGroups(topicData) {
   });
 }
 
-async function runStepActions(page, stepId, stepGroup) {
+async function runStepActions(page, remoteController, stepId, stepGroup) {
   logLine(`STEP ${stepId}: started`);
   for (const action of stepGroup.actions) {
     if (action.type === "remote") {
-      await pressRemoteKey(page, action.key);
+      await pressRemoteKey(page, remoteController, action.key);
       logLine(`STEP ${stepId}: remote "${action.key}"`);
     } else if (action.type === "wait") {
       await page.waitForTimeout(action.ms);
@@ -257,6 +354,12 @@ async function run() {
   fs.mkdirSync(logsDir, { recursive: true });
   fs.writeFileSync(runLogPath, "", "utf8");
   const rl = readline.createInterface({ input, output });
+  const remoteController = useSamsungRemoteDriver() ? createSamsungRemoteController() : null;
+  console.log(
+    remoteController
+      ? "Remote input mode: samsung-tv-remote package (RM UI capture button still used)"
+      : "Remote input mode: RM UI remote map",
+  );
 
   const browser = await chromium.launch({ headless: false });
   const context = await browser.newContext({ viewport: null });
@@ -320,7 +423,7 @@ async function run() {
           const resetStepGroups = toStepGroups(resetTopic);
           for (let resetStepIndex = 0; resetStepIndex < resetStepGroups.length; resetStepIndex += 1) {
             const resetStepId = `reset-0-${resetStepIndex + 1}`;
-            await runStepActions(page, resetStepId, resetStepGroups[resetStepIndex]);
+            await runStepActions(page, remoteController, resetStepId, resetStepGroups[resetStepIndex]);
           }
           logLine(`RESET before topic ${topicId}: finished`);
         }
@@ -331,7 +434,7 @@ async function run() {
       for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
         const stepGroup = stepGroups[stepIndex];
         const stepId = `${topicId}-${stepIndex + 1}`;
-        await runStepActions(page, stepId, stepGroup);
+        await runStepActions(page, remoteController, stepId, stepGroup);
 
         if (stepGroup.skipCapture) {
           logLine(`STEP ${stepId}: capture skipped`);
@@ -370,6 +473,7 @@ async function run() {
   } finally {
     process.removeAllListeners("SIGINT");
     process.removeAllListeners("SIGTERM");
+    remoteController?.disconnect();
     rl.close();
     await context.close();
     await browser.close();
