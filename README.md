@@ -22,7 +22,7 @@ This repository contains a Playwright starter automation for Samsung RMUS Remote
    ```
 
 ## Configuration
-Update `config/testConfig.js` to change environment URL, selectors, or credentials:
+Update `config/automationConfig.js` to change environment URL, selectors, or credentials:
 
 - `baseUrl`: target environment URL
 - `selectors.usernameInput`
@@ -55,7 +55,7 @@ Update `config/testConfig.js` to change environment URL, selectors, or credentia
 
 ## Authentication (storageState)
 - This project reuses authenticated session state from `playwright/.auth/user.json`.
-- Username and password are filled automatically from `testConfig.js`.
+- Username and password are filled automatically from `automationConfig.js`.
 - PIN/OTP codes must be entered manually in the browser when prompted (since they are randomized).
 - If your session expires, run setup again:
   ```powershell

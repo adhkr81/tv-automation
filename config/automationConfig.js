@@ -1,4 +1,4 @@
-export const testConfig = {
+export const automationConfig = {
   // New target portal.
   baseUrl: "https://rmus.samsungcsportal.com/RemoteControl#none",
 
