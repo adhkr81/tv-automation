@@ -5,7 +5,7 @@ import { stdin as input, stdout as output } from "node:process";
 import { chromium } from "playwright";
 import { automationConfig } from "../config/automationConfig.js";
 import { loginAndWaitAuthenticated } from "../lib/loginFlow.js";
-import { topics } from "./topics.mjs";
+import { reset, topics } from "./topics.mjs";
 
 const outputRoot = path.join(process.cwd(), "captures");
 const runDir = outputRoot;
@@ -219,6 +219,39 @@ async function triggerRmCapture(page, context, topicId) {
   return { saved, reason };
 }
 
+function toStepGroups(topicData) {
+  const topicSkipCapture = Boolean(topicData?.skipCapture);
+  return (topicData?.steps || []).map((s) => {
+    if (Array.isArray(s)) {
+      return {
+        actions: s,
+        captureRetries: 3,
+        retryWaitMs: 800,
+        skipCapture: topicSkipCapture,
+      };
+    }
+    return {
+      actions: Array.isArray(s.actions) ? s.actions : [],
+      captureRetries: typeof s.captureRetries === "number" ? s.captureRetries : 3,
+      retryWaitMs: typeof s.retryWaitMs === "number" ? s.retryWaitMs : 800,
+      skipCapture: typeof s.skipCapture === "boolean" ? s.skipCapture : topicSkipCapture,
+    };
+  });
+}
+
+async function runStepActions(page, stepId, stepGroup) {
+  logLine(`STEP ${stepId}: started`);
+  for (const action of stepGroup.actions) {
+    if (action.type === "remote") {
+      await pressRemoteKey(page, action.key);
+      logLine(`STEP ${stepId}: remote "${action.key}"`);
+    } else if (action.type === "wait") {
+      await page.waitForTimeout(action.ms);
+      logLine(`STEP ${stepId}: wait ${action.ms}ms`);
+    }
+  }
+}
+
 async function run() {
   fs.mkdirSync(runDir, { recursive: true });
   fs.mkdirSync(logsDir, { recursive: true });
@@ -280,33 +313,25 @@ async function run() {
 
     for (let i = startIndex; i < topicEntries.length; i += 1) {
       const [topicId, topicData] = topicEntries[i];
+      if (i > startIndex) {
+        const resetTopic = reset?.["0"];
+        if (resetTopic) {
+          logLine(`RESET before topic ${topicId}: started`);
+          const resetStepGroups = toStepGroups(resetTopic);
+          for (let resetStepIndex = 0; resetStepIndex < resetStepGroups.length; resetStepIndex += 1) {
+            const resetStepId = `reset-0-${resetStepIndex + 1}`;
+            await runStepActions(page, resetStepId, resetStepGroups[resetStepIndex]);
+          }
+          logLine(`RESET before topic ${topicId}: finished`);
+        }
+      }
       console.log(`Running topic: ${topicId}`);
       logLine(`TOPIC ${topicId}: started`);
-
-      const stepGroups = (topicData.steps || []).map((s) => {
-        if (Array.isArray(s)) {
-          return { actions: s, captureRetries: 3, retryWaitMs: 800, skipCapture: false };
-        }
-        return {
-          actions: Array.isArray(s.actions) ? s.actions : [],
-          captureRetries: typeof s.captureRetries === "number" ? s.captureRetries : 3,
-          retryWaitMs: typeof s.retryWaitMs === "number" ? s.retryWaitMs : 800,
-          skipCapture: Boolean(s.skipCapture),
-        };
-      });
+      const stepGroups = toStepGroups(topicData);
       for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
         const stepGroup = stepGroups[stepIndex];
         const stepId = `${topicId}-${stepIndex + 1}`;
-        logLine(`STEP ${stepId}: started`);
-        for (const action of stepGroup.actions) {
-          if (action.type === "remote") {
-            await pressRemoteKey(page, action.key);
-            logLine(`STEP ${stepId}: remote "${action.key}"`);
-          } else if (action.type === "wait") {
-            await page.waitForTimeout(action.ms);
-            logLine(`STEP ${stepId}: wait ${action.ms}ms`);
-          }
-        }
+        await runStepActions(page, stepId, stepGroup);
 
         if (stepGroup.skipCapture) {
           logLine(`STEP ${stepId}: capture skipped`);
