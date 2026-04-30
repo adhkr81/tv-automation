@@ -12,41 +12,35 @@ import { reset, topics } from "./topics.mjs";
 dotenv.config();
 
 const { SamsungTvRemote } = samsungTvRemotePkg;
+const { timeouts = {}, capture = {}, runModes = {}, topicPolicy = {}, healthChecks = {}, featureFlags = {}, logNaming = {} } =
+  automationConfig;
 
-const outputRoot = path.join(process.cwd(), "captures");
+const outputRoot = path.join(process.cwd(), capture.outputDir || "captures");
 const runDir = outputRoot;
 const logsDir = path.join(process.cwd(), "logs");
-const runStamp = new Date().toISOString().replace(/[:.]/g, "-");
-const runLogPath = path.join(logsDir, `capture-run-${runStamp}.log`);
+/** Seconds-only stamp for filenames (no milliseconds suffix). */
+const runStamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
+let runLogPath = "";
+let runSummaryLogPath = "";
+const isSingleTopicRun = process.argv.includes("--single");
 
-const RM_TO_SAMSUNG_KEY = {
-  "?": "KEY_CONTENTS",
-  "◀": "KEY_LEFT",
-  "▶": "KEY_RIGHT",
-  "▲": "KEY_UP",
-  "▼": "KEY_DOWN",
-  ENTER: "KEY_ENTER",
-  RETURN: "KEY_RETURN",
-  EXIT: "KEY_EXIT",
-  MENU: "KEY_MENU",
-  INFO: "KEY_INFO",
-  TOOLS: "KEY_TOOLS",
-  POWER: "KEY_POWER",
-  INPUT: "KEY_SOURCE",
-  MUTE: "KEY_MUTE",
-  "VOL UP": "KEY_VOLUP",
-  "VOL DOWN": "KEY_VOLDOWN",
-  "TUNNING/CH UP": "KEY_CHUP",
-  "TUNNING/CH DOWN": "KEY_CHDOWN",
-  GUIDE: "KEY_GUIDE",
-  HOME: "KEY_HOME",
-  SEARCH: "KEY_SEARCH",
-  CONTENTS: "KEY_CONTENTS",
-  A: "KEY_RED",
-  B: "KEY_GREEN",
-  C: "KEY_YELLOW",
-  D: "KEY_CYAN",
-};
+function applyLogTemplate(template, topicId) {
+  return String(template || "")
+    .replaceAll("{topicId}", String(topicId || "unknown"))
+    .replaceAll("{timestamp}", runStamp);
+}
+
+function shouldRunResetForTopic(topicIndex, startIndex) {
+  if (topicIndex === startIndex) return runModes.runResetBeforeFirstTopic !== false;
+  return runModes.runResetBetweenTopics !== false;
+}
+
+function getAllowedTopicSet() {
+  if (!Array.isArray(topicPolicy.allowTopicIds) || topicPolicy.allowTopicIds.length === 0) {
+    return null;
+  }
+  return new Set(topicPolicy.allowTopicIds.map((id) => String(id).toLowerCase()));
+}
 
 function normalizeActionKeyName(value) {
   return String(value || "").trim().toUpperCase();
@@ -55,19 +49,13 @@ function normalizeActionKeyName(value) {
 function resolveSamsungKey(actionKey) {
   const normalized = normalizeActionKeyName(actionKey);
   if (!normalized) return null;
-  if (normalized.startsWith("KEY_")) return normalized;
-  return RM_TO_SAMSUNG_KEY[normalized] || null;
-}
-
-function useSamsungRemoteDriver() {
-  const flag = (process.env.USE_SAMSUNG_REMOTE || "").trim().toLowerCase();
-  return ["1", "true", "yes", "y", "on"].includes(flag);
+  return normalized.startsWith("KEY_") ? normalized : null;
 }
 
 function createSamsungRemoteController() {
   const ip = (process.env.SAMSUNG_TV_IP || "").trim();
   if (!ip) {
-    throw new Error("USE_SAMSUNG_REMOTE is enabled, but SAMSUNG_TV_IP is missing.");
+    throw new Error("SAMSUNG_TV_IP is required for samsung-tv-remote mode.");
   }
 
   const portRaw = (process.env.SAMSUNG_TV_PORT || "").trim();
@@ -91,7 +79,7 @@ function createSamsungRemoteController() {
       const samsungKey = resolveSamsungKey(actionKey);
       if (!samsungKey) {
         throw new Error(
-          `No Samsung key mapping for "${actionKey}". Use KEY_* in topics or add a map entry.`,
+          `Invalid key "${actionKey}". Use samsung-tv-remote key names (KEY_*).`,
         );
       }
       await remote.sendKey(samsungKey);
@@ -106,55 +94,97 @@ function createSamsungRemoteController() {
 }
 
 function logLine(message) {
+  if (!runLogPath) return;
   const ts = new Date().toISOString();
   fs.appendFileSync(runLogPath, `[${ts}] ${message}\n`, "utf8");
 }
 
-async function ensureRemoteMapReady(page, rl) {
+function logSummaryLine(message) {
+  if (!runSummaryLogPath) return;
+  const ts = new Date().toISOString();
+  fs.appendFileSync(runSummaryLogPath, `[${ts}] ${message}\n`, "utf8");
+}
+
+/** @param {boolean} [alsoSummary] When false, only the detailed log is written (e.g. retry attempts). */
+function logCaptureFailure(message, alsoSummary = true) {
+  const line = `***** ${message} *****`;
+  logLine(line);
+  if (alsoSummary) logSummaryLine(line);
+}
+
+async function waitForUrlIncludes(page, requiredPart, timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (page.url().includes(requiredPart)) {
+      return true;
+    }
+    await page.waitForTimeout(250);
+  }
+  return false;
+}
+
+async function ensureRemoteMapReady(page) {
   await loginAndWaitAuthenticated(page, {
     interactivePinConfirmation: true,
-    waitForUserConfirmation: async () => {
-      await rl.question("After entering PIN and seeing Remote Control page, press Enter to start topics...");
-    },
   });
-  await page.waitForTimeout(2000);
+  for (const requiredPart of healthChecks.requiredUrlIncludes || []) {
+    const matched = await waitForUrlIncludes(page, requiredPart, timeouts.remoteMapReadyMs ?? 60000);
+    if (!matched) {
+      throw new Error(`Health check failed: URL does not include "${requiredPart}". Current URL: ${page.url()}`);
+    }
+  }
+
+  // Only block on remote-control readiness selectors.
+  // Login selectors (e.g. #userId) may no longer exist after auth and should not block startup.
+  const blockingSelectors = Array.from(
+    new Set([
+      automationConfig.selectors.remoteMap,
+      automationConfig.selectors.remoteArea,
+      ...(healthChecks.requiredSelectors || []).filter((selector) => /remote|map|area/i.test(selector)),
+    ]),
+  ).filter(Boolean);
+  for (const selector of blockingSelectors) {
+    await page.locator(selector).first().waitFor({
+      state: "attached",
+      timeout: timeouts.remoteMapReadyMs ?? 60000,
+    });
+  }
+
+  await page.waitForTimeout(timeouts.initialPageSettleMs ?? 2000);
 
   // Optional Start click; do not fail if backend is temporarily limited.
-  const startButton = page.locator("#btnRemoteStart");
-  if (await startButton.isVisible().catch(() => false)) {
+  const startButton = page.locator(automationConfig.selectors.remoteStartButton);
+  if (featureFlags.enableStartButtonClick !== false && (await startButton.isVisible().catch(() => false))) {
     const enabled = await startButton
       .evaluate((el) => !el.classList.contains("ui-state-disabled"))
       .catch(() => false);
     if (enabled) {
       await startButton.evaluate((el) => el.click());
-      await page.waitForTimeout(1500);
+      await page.waitForTimeout(timeouts.startButtonPostClickMs ?? 1500);
     }
   }
 
-  const remoteMap = page.locator("map#remote_control_TV_US");
-  await remoteMap.waitFor({ state: "attached", timeout: 60000 });
-  await page.locator("map#remote_control_TV_US area").first().waitFor({ state: "attached", timeout: 60000 });
+  const remoteMap = page.locator(automationConfig.selectors.remoteMap);
+  await remoteMap.waitFor({ state: "attached", timeout: timeouts.remoteMapReadyMs ?? 60000 });
+  await page
+    .locator(automationConfig.selectors.remoteArea)
+    .first()
+    .waitFor({ state: "attached", timeout: timeouts.remoteMapReadyMs ?? 60000 });
 }
 
-async function pressRemoteKey(page, remoteController, keyName) {
-  if (remoteController) {
-    await remoteController.pressKey(keyName);
-    return;
-  }
-
-  const button = page.locator(`map#remote_control_TV_US area[alt="${keyName}"]`).first();
-  await button.waitFor({ state: "attached", timeout: 15000 });
-  await button.evaluate((el) => el.click());
+async function pressRemoteKey(remoteController, keyName) {
+  await remoteController.pressKey(keyName);
 }
 
 async function getCapturePopupPage(page, context) {
   // Wait for a newly opened popup from this click.
-  const popup = await page.waitForEvent("popup", { timeout: 12000 }).catch(() => null);
+  const popup = await page.waitForEvent("popup", { timeout: timeouts.popupEventMs ?? 12000 }).catch(() => null);
   if (popup) return popup;
+  if (featureFlags.enablePopupFallback === false) return null;
 
   // Fallback: some browsers may not surface popup event consistently,
   // and popup URLs can stay about:blank briefly before navigation.
-  const deadline = Date.now() + 20000;
+  const deadline = Date.now() + (timeouts.popupFallbackLookupMs ?? 20000);
   while (Date.now() < deadline) {
     const capturePage = context.pages().find((p) => p !== page);
     if (capturePage) return capturePage;
@@ -163,52 +193,161 @@ async function getCapturePopupPage(page, context) {
   return null;
 }
 
-async function waitForLoadingCycleToFinish(page) {
-  const loadingOverlays = page.locator(
-    ".rc_virtual .box_loading, .pop_rm .box_loading, .rc_keys .box_loading",
-  );
-  await loadingOverlays
-    .first()
-    .waitFor({ state: "visible", timeout: 6000 })
-    .catch(() => {});
-  await loadingOverlays
-    .first()
-    .waitFor({ state: "hidden", timeout: 45000 })
-    .catch(() => {});
+async function waitForLoadingCycleToFinish(page, options = {}) {
+  const {
+    onInactiveTick = null,
+    inactiveIntervalMs = capture.heartbeatIntervalMs ?? 10000,
+    visibleTimeoutMs = timeouts.loadingVisibleMs ?? 6000,
+    hiddenTimeoutMs = timeouts.loadingHiddenMs ?? 45000,
+  } = options;
+  const loadingOverlays = page.locator(automationConfig.selectors.loadingOverlays);
+  const firstOverlay = loadingOverlays.first();
+
+  const becameVisible = await firstOverlay
+    .waitFor({ state: "visible", timeout: visibleTimeoutMs })
+    .then(() => true)
+    .catch(() => false);
+
+  if (!becameVisible) {
+    return;
+  }
+
+  const startedAt = Date.now();
+  let lastInactiveTickAt = 0;
+  while (Date.now() - startedAt < hiddenTimeoutMs) {
+    const isHidden = await firstOverlay
+      .isHidden()
+      .catch(() => true);
+    if (isHidden) {
+      return;
+    }
+
+    // Some RM overlays remain attached and can report as visible even when effectively inactive.
+    // Treat those as finished to avoid stalling capture flow.
+    const isEffectivelyInactive = await firstOverlay
+      .evaluate((el) => {
+        const style = window.getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        const opacity = Number.parseFloat(style.opacity || "1");
+        const hiddenByStyle =
+          style.display === "none" ||
+          style.visibility === "hidden" ||
+          opacity <= 0 ||
+          rect.width === 0 ||
+          rect.height === 0;
+        const hiddenByClass = el.classList.contains("hidden") || el.classList.contains("hide");
+        return hiddenByStyle || hiddenByClass;
+      })
+      .catch(() => true);
+    if (isEffectivelyInactive) {
+      return;
+    }
+
+    if (onInactiveTick && Date.now() - lastInactiveTickAt >= inactiveIntervalMs) {
+      await onInactiveTick();
+      lastInactiveTickAt = Date.now();
+    }
+
+    await page.waitForTimeout(250);
+  }
 }
 
-async function triggerRmCapture(page, context, topicId) {
-  // Ensure previous capture popup is closed before triggering a new one.
+async function closeCapturePopups(context, page) {
   const oldCapturePopups = context
     .pages()
     .filter((p) => p !== page && p.url().includes("/RemoteControl/GraphicCaptureImage"));
   for (const oldPopup of oldCapturePopups) {
     await oldPopup.close().catch(() => {});
   }
+}
 
-  const captureButton = page.locator("#btnGraphicCapture").first();
-  await captureButton.waitFor({ state: "visible", timeout: 15000 });
+async function logCapturePopupDiagnostics(popup, stepId) {
+  const diag = await popup
+    .evaluate(() => {
+      const img = document.querySelector("#previewImg");
+      const src = img?.getAttribute("src") || "";
+      const bi = window.blobImg;
+      const iu = typeof window.imgUrl === "string" ? window.imgUrl : "";
+      let canvasErr = "";
+      if (img?.complete && img.naturalWidth > 0) {
+        try {
+          const cnv = document.createElement("canvas");
+          cnv.width = img.naturalWidth;
+          cnv.height = img.naturalHeight;
+          const ctx = cnv.getContext("2d");
+          if (!ctx) canvasErr = "no-2d-context";
+          else {
+            ctx.drawImage(img, 0, 0);
+            cnv.toDataURL("image/png");
+          }
+        } catch (e) {
+          canvasErr = String(e?.message || e);
+        }
+      }
+      return {
+        pathname: typeof location !== "undefined" ? location.pathname : "",
+        hasPreviewImg: !!img,
+        previewSrcScheme: src.length ? `${src.slice(0, 24)}…` : "",
+        previewSrcLength: src.length,
+        imgComplete: !!img?.complete,
+        naturalWidth: img?.naturalWidth ?? 0,
+        naturalHeight: img?.naturalHeight ?? 0,
+        blobImgKind:
+          bi == null ? "absent" : bi instanceof Blob ? "Blob" : Object.prototype.toString.call(bi),
+        blobImgSize: bi instanceof Blob ? bi.size : null,
+        hasImgUrl: iu.length > 0,
+        imgUrlLength: iu.length,
+        canvasProbeError: canvasErr || null,
+      };
+    })
+    .catch((e) => ({ diagEvaluateError: String(e?.message || e) }));
 
-  const popupPromise = getCapturePopupPage(page, context);
-  const downloadPromise = context.waitForEvent("download", { timeout: 8000 }).catch(() => null);
+  logLine(`STEP ${stepId}: capture popup diagnostics ${JSON.stringify(diag)}`);
+}
 
-  await captureButton.evaluate((el) => el.click());
+async function triggerRmCapture(page, context, remoteController, topicId, options = {}) {
+  const { reuseExistingPopup = false } = options;
+  if (!reuseExistingPopup) {
+    // Ensure previous capture popup is closed before triggering a new one.
+    await closeCapturePopups(context, page);
+  }
 
-  // RM briefly enters loading state during Graphic Capture.
-  await waitForLoadingCycleToFinish(page);
+  const captureButton = page.locator(automationConfig.selectors.captureButton).first();
+  await captureButton.waitFor({ state: "visible", timeout: timeouts.popupImageReadyMs ?? 15000 });
 
-  let popup = await popupPromise;
-  if (!popup) {
-    // If loading just finished, popup might appear shortly after.
-    await waitForLoadingCycleToFinish(page);
-    popup = await getCapturePopupPage(page, context);
+  let downloadPromise = Promise.resolve(null);
+  let popup = context
+    .pages()
+    .find((p) => p !== page && p.url().includes("/RemoteControl/GraphicCaptureImage"));
+
+  if (!reuseExistingPopup || !popup) {
+    const popupPromise = getCapturePopupPage(page, context);
+    downloadPromise = context.waitForEvent("download", { timeout: timeouts.downloadMs ?? 8000 }).catch(() => null);
+    await captureButton.evaluate((el) => el.click());
+    // Prioritize popup acquisition first; extraction should start as soon as popup is available.
+    popup = await popupPromise;
+    if (!popup) {
+      // If popup was not detected yet, wait for RM loading cycle and retry popup lookup.
+      // If loading just finished, popup might appear shortly after.
+      await waitForLoadingCycleToFinish(page, {
+        onInactiveTick:
+          featureFlags.enableHeartbeatRedKey === false
+            ? null
+            : async () => {
+                await remoteController.pressKey(capture.heartbeatKey || "KEY_RED");
+                logLine(`STEP ${topicId}: heartbeat "${capture.heartbeatKey || "KEY_RED"}" sent while RM inactive`);
+              },
+        inactiveIntervalMs: capture.heartbeatIntervalMs ?? 10000,
+      });
+      popup = await getCapturePopupPage(page, context);
+    }
   }
   let saved = false;
   let reason = "unknown";
   if (popup) {
-    await popup.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+    await popup.waitForLoadState("domcontentloaded", { timeout: timeouts.popupDomReadyMs ?? 10000 }).catch(() => {});
     await popup.bringToFront().catch(() => {});
-    await popup.waitForTimeout(2000).catch(() => {});
+    await popup.waitForTimeout(timeouts.popupInitialSettleMs ?? 2000).catch(() => {});
 
     // First capture can be slower; wait for either rendered preview or fetched blob.
     await popup
@@ -220,56 +359,226 @@ async function triggerRmCapture(page, context, topicId) {
           const hasBlobBuffer = !!window.blobImg;
           return hasRenderedImg || hasBlobBuffer;
         },
-        { timeout: 15000 },
+        { timeout: timeouts.popupImageReadyMs ?? 15000 },
       )
       .catch(() => {});
 
     // Save capture directly from popup image source/blob (without clicking Export).
+    const popupEvaluateMs = timeouts.popupEvaluateMs ?? 120000;
+    const popupBlobFetchMs = timeouts.popupBlobFetchMs ?? 45000;
+    const popupBlobImgWaitMs = timeouts.popupBlobImgWaitMs ?? 12000;
+    const popupExtractAttempts = Math.max(1, capture.popupExtractAttempts ?? 6);
+    const enablePreviewScreenshotFallback = capture.enablePreviewScreenshotFallback === true;
     let captureData = null;
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      captureData = await popup
-        .evaluate(async () => {
-          const imgEl = document.querySelector("#previewImg");
-          const directUrl = typeof window.imgUrl === "string" ? window.imgUrl : "";
-          const renderedSource = imgEl?.getAttribute("src") || "";
+    let previewScreenshotBuf = null;
+    let lastExtractFailure = /** @type {{ ok: false; stage: string; detail?: string } | null} */ (null);
+    for (let attempt = 1; attempt <= popupExtractAttempts; attempt += 1) {
+      /** Playwright Page.evaluate only accepts (fn, arg); timeout must not be passed as a 3rd argument. */
+      const extractEvaluatePromise = popup.evaluate(
+          async ({ fetchMs, blobImgWaitMs }) => {
+            async function timedFetch(url, init = {}) {
+              try {
+                const ms = fetchMs;
+                if (typeof AbortSignal !== "undefined" && AbortSignal.timeout) {
+                  return await fetch(url, { ...init, signal: AbortSignal.timeout(ms) });
+                }
+                const ac = new AbortController();
+                const timer = setTimeout(() => ac.abort(), ms);
+                try {
+                  return await fetch(url, { ...init, signal: ac.signal });
+                } finally {
+                  clearTimeout(timer);
+                }
+              } catch {
+                return null;
+              }
+            }
 
-          let blob = null;
+            /** @returns {{ ok: true; base64: string; mime: string } | { ok: false; stage: string; detail?: string }} */
+            async function blobToPayload(blob, stage) {
+              const mime = blob.type || "image/png";
+              let readerErr = "";
+              try {
+                const dataUrl = await new Promise((resolve, reject) => {
+                  const fr = new FileReader();
+                  fr.onload = () => resolve(fr.result);
+                  fr.onerror = () => reject(fr.error || new Error("FileReader failed"));
+                  fr.readAsDataURL(blob);
+                });
+                const str = String(dataUrl);
+                const comma = str.indexOf(",");
+                if (comma >= 0) return { ok: true, base64: str.slice(comma + 1), mime };
+                readerErr = "dataUrl-no-comma";
+              } catch (e) {
+                readerErr = String(e?.message || e);
+              }
+              try {
+                const buffer = await blob.arrayBuffer();
+                let binary = "";
+                const bytes = new Uint8Array(buffer);
+                const sliceLen = 8192;
+                for (let i = 0; i < bytes.length; i += sliceLen) {
+                  const part = bytes.subarray(i, Math.min(i + sliceLen, bytes.length));
+                  binary += String.fromCharCode.apply(null, part);
+                }
+                return { ok: true, base64: btoa(binary), mime };
+              } catch (e2) {
+                return {
+                  ok: false,
+                  stage,
+                  detail: `FileReader:${readerErr};binary:${String(e2?.message || e2)}`,
+                };
+              }
+            }
 
-          // Best source: page-level blob produced by popup script.
-          if (window.blobImg instanceof Blob) {
-            blob = window.blobImg;
-          }
+            async function waitForBlobImg(maxWaitMs) {
+              const step = 250;
+              const deadline = Date.now() + maxWaitMs;
+              while (Date.now() < deadline) {
+                if (window.blobImg instanceof Blob) return window.blobImg;
+                await new Promise((r) => setTimeout(r, step));
+              }
+              return window.blobImg instanceof Blob ? window.blobImg : null;
+            }
 
-          // Fallback: rendered preview source if available.
-          if (!blob && renderedSource) {
-            const resFromPreview = await fetch(renderedSource).catch(() => null);
-            if (resFromPreview?.ok) blob = await resFromPreview.blob();
-          }
+            function payloadFromPreviewCanvas(imgEl) {
+              if (!imgEl?.complete || imgEl.naturalWidth <= 0) return null;
+              try {
+                const cnv = document.createElement("canvas");
+                cnv.width = imgEl.naturalWidth;
+                cnv.height = imgEl.naturalHeight;
+                const ctx = cnv.getContext("2d");
+                if (!ctx) return null;
+                ctx.drawImage(imgEl, 0, 0);
+                const dataUrl = cnv.toDataURL("image/png");
+                const comma = dataUrl.indexOf(",");
+                if (comma < 0) return null;
+                return { base64: dataUrl.slice(comma + 1), mime: "image/png" };
+              } catch {
+                return null;
+              }
+            }
 
-          // Final fallback: fetch popup's image endpoint directly.
-          if (!blob && directUrl) {
-            const url = `${directUrl}${directUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
-            const resFromEndpoint = await fetch(url, { cache: "no-store" }).catch(() => null);
-            if (resFromEndpoint?.ok) blob = await resFromEndpoint.blob();
-          }
+            const imgEl = document.querySelector("#previewImg");
+            const directUrl = typeof window.imgUrl === "string" ? window.imgUrl : "";
+            const renderedSource = imgEl?.getAttribute("src") || "";
 
-          if (!blob) return null;
-          const mime = blob.type || "image/png";
-          const buffer = await blob.arrayBuffer();
-          let binary = "";
-          const bytes = new Uint8Array(buffer);
-          const chunkSize = 0x8000;
-          for (let i = 0; i < bytes.length; i += chunkSize) {
-            const chunk = bytes.subarray(i, i + chunkSize);
-            binary += String.fromCharCode(...chunk);
-          }
-          const base64 = btoa(binary);
-          return { base64, mime };
-        })
-        .catch(() => null);
+            let blobReadFail = /** @type {{ ok: false; stage: string; detail?: string } | null} */ (null);
 
-      if (captureData?.base64) break;
-      await popup.waitForTimeout(1000).catch(() => {});
+            const rmBlob =
+              (await waitForBlobImg(blobImgWaitMs)) ||
+              (window.blobImg instanceof Blob ? window.blobImg : null);
+            if (rmBlob) {
+              const br = await blobToPayload(rmBlob, "window.blobImg-read");
+              if (br.ok) return br;
+              blobReadFail = br;
+            }
+
+            const fromCanvas = payloadFromPreviewCanvas(imgEl);
+            if (fromCanvas) return { ok: true, base64: fromCanvas.base64, mime: fromCanvas.mime };
+
+            const hints = [];
+            if (!imgEl) hints.push("no-#previewImg");
+            else {
+              if (!imgEl.complete) hints.push("img-incomplete");
+              if (imgEl.naturalWidth <= 0) hints.push("img-natural-dims-zero");
+              if (renderedSource && !fromCanvas && imgEl.complete && imgEl.naturalWidth > 0) {
+                hints.push("canvas-failed-or-tainted");
+              }
+            }
+            if (!rmBlob) hints.push(`no-window.blobImg-after-${blobImgWaitMs}ms`);
+
+            let blob = null;
+
+            if (renderedSource) {
+              const resFromPreview = await timedFetch(renderedSource);
+              if (resFromPreview?.ok) {
+                blob = await resFromPreview.blob().catch(() => null);
+                if (!blob?.size) hints.push("preview-fetch-blob-empty");
+              } else {
+                hints.push(`preview-fetch:${resFromPreview?.status ?? "null-or-aborted"}`);
+              }
+            } else hints.push("no-preview-src-attr");
+
+            if (!blob && directUrl) {
+              const url = `${directUrl}${directUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
+              const resFromEndpoint = await timedFetch(url, { cache: "no-store" });
+              if (resFromEndpoint?.ok) {
+                blob = await resFromEndpoint.blob().catch(() => null);
+                if (!blob?.size) hints.push("imgUrl-fetch-blob-empty");
+              } else {
+                hints.push(`imgUrl-fetch:${resFromEndpoint?.status ?? "null-or-aborted"}`);
+              }
+            } else if (!blob && !directUrl) hints.push("no-window.imgUrl");
+
+            if (!blob) {
+              const blobFailHint = blobReadFail
+                ? `${blobReadFail.stage}${blobReadFail.detail ? `(${blobReadFail.detail})` : ""}`
+                : "";
+              const detail = [blobFailHint, hints.filter(Boolean).join("; ")].filter(Boolean).join(" | ");
+              return {
+                ok: false,
+                stage: "no-image-bytes",
+                detail: detail || undefined,
+              };
+            }
+
+            const fr = await blobToPayload(blob, "fetched-blob-read");
+            if (fr.ok) return fr;
+            return fr;
+          },
+          { fetchMs: popupBlobFetchMs, blobImgWaitMs: popupBlobImgWaitMs },
+      );
+
+      let extractResult;
+      try {
+        extractResult = await Promise.race([
+          extractEvaluatePromise,
+          new Promise((_, reject) =>
+            setTimeout(
+              () => reject(new Error(`evaluate-timeout-after-${popupEvaluateMs}ms`)),
+              popupEvaluateMs,
+            ),
+          ),
+        ]);
+      } catch (e) {
+        extractResult = {
+          ok: false,
+          stage: "evaluate-exception",
+          detail: String(e?.message || e || "unknown"),
+        };
+      }
+
+      if (extractResult?.ok === true) {
+        captureData = { base64: extractResult.base64, mime: extractResult.mime };
+        break;
+      }
+
+      lastExtractFailure =
+        extractResult && extractResult.ok === false
+          ? extractResult
+          : { ok: false, stage: "evaluate-null", detail: "non-object-result" };
+
+      logLine(
+        `STEP ${topicId}: extract attempt ${attempt}/${popupExtractAttempts} → ${lastExtractFailure.stage}` +
+          (lastExtractFailure.detail ? `: ${lastExtractFailure.detail}` : ""),
+      );
+
+      if (enablePreviewScreenshotFallback) {
+        try {
+          const previewLoc = popup.locator("#previewImg").first();
+          await previewLoc.waitFor({ state: "visible", timeout: timeouts.popupImageReadyMs ?? 15000 });
+          previewScreenshotBuf = await previewLoc.screenshot({
+            type: "png",
+            timeout: timeouts.previewScreenshotMs ?? 30000,
+          });
+          if (previewScreenshotBuf && previewScreenshotBuf.length > 50) break;
+        } catch {
+          previewScreenshotBuf = null;
+        }
+      }
+
+      await popup.waitForTimeout(capture.popupWaitMs ?? 1500).catch(() => {});
     }
 
     if (captureData?.base64) {
@@ -279,20 +588,42 @@ async function triggerRmCapture(page, context, topicId) {
       console.log(`RM OSD capture saved from popup: ${targetPath}`);
       saved = true;
       reason = "saved-from-popup";
+      await popup.close().catch(() => {});
+      const popupGoneDeadline = Date.now() + (timeouts.popupPostCloseMs ?? 5000);
+      while (Date.now() < popupGoneDeadline) {
+        const stillOpen = context
+          .pages()
+          .some((p) => p !== page && p.url().includes("/RemoteControl/GraphicCaptureImage"));
+        if (!stillOpen) break;
+        await page.waitForTimeout(200);
+      }
+    } else if (previewScreenshotBuf && previewScreenshotBuf.length > 50) {
+      const targetPath = path.join(runDir, `${topicId}.png`);
+      fs.writeFileSync(targetPath, previewScreenshotBuf);
+      console.log(`RM OSD capture saved from preview screenshot: ${targetPath}`);
+      saved = true;
+      reason = "saved-from-preview-screenshot";
+      await popup.close().catch(() => {});
+      // Explicitly wait until popup is gone before continuing next step.
+      const popupGoneDeadline = Date.now() + (timeouts.popupPostCloseMs ?? 5000);
+      while (Date.now() < popupGoneDeadline) {
+        const stillOpen = context
+          .pages()
+          .some((p) => p !== page && p.url().includes("/RemoteControl/GraphicCaptureImage"));
+        if (!stillOpen) break;
+        await page.waitForTimeout(200);
+      }
     } else {
       console.log(`Popup opened for ${topicId}, but direct image extraction failed.`);
       reason = "popup-image-extraction-failed";
-    }
-
-    await popup.close().catch(() => {});
-    // Explicitly wait until popup is gone before continuing next step.
-    const popupGoneDeadline = Date.now() + 5000;
-    while (Date.now() < popupGoneDeadline) {
-      const stillOpen = context
-        .pages()
-        .some((p) => p !== page && p.url().includes("/RemoteControl/GraphicCaptureImage"));
-      if (!stillOpen) break;
-      await page.waitForTimeout(200);
+      if (lastExtractFailure) {
+        logLine(
+          `STEP ${topicId}: extract exhausted (${popupExtractAttempts} attempts) → ${lastExtractFailure.stage}` +
+            (lastExtractFailure.detail ? `: ${lastExtractFailure.detail}` : ""),
+        );
+      }
+      await logCapturePopupDiagnostics(popup, topicId);
+      // Keep popup open so the next retry can use reuseExistingPopup without clicking Capture again.
     }
   } else {
     console.log(`No capture popup detected for topic: ${topicId}`);
@@ -322,26 +653,160 @@ function toStepGroups(topicData) {
     if (Array.isArray(s)) {
       return {
         actions: s,
-        captureRetries: 3,
-        retryWaitMs: 800,
+        captureRetries: capture.retryAttempts ?? 3,
+        retryWaitMs: capture.retryWaitMs ?? 800,
         skipCapture: topicSkipCapture,
       };
     }
     return {
       actions: Array.isArray(s.actions) ? s.actions : [],
-      captureRetries: typeof s.captureRetries === "number" ? s.captureRetries : 3,
-      retryWaitMs: typeof s.retryWaitMs === "number" ? s.retryWaitMs : 800,
+      captureRetries: typeof s.captureRetries === "number" ? s.captureRetries : (capture.retryAttempts ?? 3),
+      retryWaitMs: typeof s.retryWaitMs === "number" ? s.retryWaitMs : (capture.retryWaitMs ?? 800),
       skipCapture: typeof s.skipCapture === "boolean" ? s.skipCapture : topicSkipCapture,
     };
   });
 }
 
+function actionToSignature(action) {
+  const type = String(action?.type || "unknown");
+  if (type === "remote") return `remote:${String(action?.key || "")}`;
+  if (type === "wait") return `wait:${Number(action?.ms || 0)}`;
+  return `${type}:${JSON.stringify(action ?? {})}`;
+}
+
+function getDefaultStepWaitMs() {
+  return Math.max(0, Number(timeouts.defaultStepWaitMs ?? 800));
+}
+
+function getNormalizedStepActionSignatures(actions) {
+  const signatures = [];
+  const defaultStepWaitMs = getDefaultStepWaitMs();
+  for (let index = 0; index < actions.length; index += 1) {
+    const action = actions[index];
+    signatures.push(actionToSignature(action));
+    if (action?.type === "remote") {
+      const nextAction = actions[index + 1];
+      const hasExplicitWait = nextAction?.type === "wait";
+      if (!hasExplicitWait && defaultStepWaitMs > 0) {
+        signatures.push(`wait:${defaultStepWaitMs}`);
+      }
+    }
+  }
+  return signatures;
+}
+
+function buildStepFingerprint(resetApplied, actionSignatures) {
+  return `reset:${resetApplied ? "1" : "0"}|${actionSignatures.join("|")}`;
+}
+
+function buildReusePlan(topicEntries, startIndex, endExclusive) {
+  const fingerprintToSourceStepId = new Map();
+  const planByStepId = new Map();
+  const topicStats = [];
+  let totalSteps = 0;
+  let captureEligibleSteps = 0;
+  let reusableSteps = 0;
+
+  for (let i = startIndex; i < endExclusive; i += 1) {
+    const [topicId, topicData] = topicEntries[i];
+    const stepGroups = toStepGroups(topicData);
+    const resetApplied = Boolean(reset?.["0"] && shouldRunResetForTopic(i, startIndex));
+    const prefixActionSignatures = [];
+    let topicReusable = 0;
+    let topicCaptureEligible = 0;
+    for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
+      const stepGroup = stepGroups[stepIndex];
+      const stepId = `${topicId}-${stepIndex + 1}`;
+      totalSteps += 1;
+      const normalizedActionSignatures = getNormalizedStepActionSignatures(stepGroup.actions);
+      prefixActionSignatures.push(...normalizedActionSignatures);
+      if (stepGroup.skipCapture) {
+        planByStepId.set(stepId, {
+          decision: "skip-capture",
+          sourceStepId: null,
+          fingerprint: null,
+        });
+        continue;
+      }
+
+      captureEligibleSteps += 1;
+      topicCaptureEligible += 1;
+      const fingerprint = buildStepFingerprint(resetApplied, prefixActionSignatures);
+      const sourceStepId = fingerprintToSourceStepId.get(fingerprint) || null;
+
+      if (sourceStepId) {
+        reusableSteps += 1;
+        topicReusable += 1;
+        planByStepId.set(stepId, {
+          decision: "reuse",
+          sourceStepId,
+          fingerprint,
+        });
+      } else {
+        fingerprintToSourceStepId.set(fingerprint, stepId);
+        planByStepId.set(stepId, {
+          decision: "capture",
+          sourceStepId: null,
+          fingerprint,
+        });
+      }
+    }
+    topicStats.push({
+      topicId,
+      totalSteps: stepGroups.length,
+      captureEligibleSteps: topicCaptureEligible,
+      reusableSteps: topicReusable,
+    });
+  }
+
+  return {
+    generatedAt: new Date().toISOString(),
+    totals: {
+      topics: endExclusive - startIndex,
+      totalSteps,
+      captureEligibleSteps,
+      reusableSteps,
+      newCaptureSteps: captureEligibleSteps - reusableSteps,
+    },
+    topicStats,
+    planByStepId,
+  };
+}
+
+function getStepCapturePath(stepId) {
+  const extensions = [".png", ".jpg", ".jpeg"];
+  for (const extension of extensions) {
+    const candidate = path.join(runDir, `${stepId}${extension}`);
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+function tryReuseCapture(sourceStepId, targetStepId) {
+  const sourcePath = getStepCapturePath(sourceStepId);
+  if (!sourcePath) {
+    return { copied: false, reason: `source-not-found:${sourceStepId}` };
+  }
+  const extension = path.extname(sourcePath) || ".png";
+  const targetPath = path.join(runDir, `${targetStepId}${extension}`);
+  fs.copyFileSync(sourcePath, targetPath);
+  return { copied: true, sourcePath, targetPath };
+}
+
 async function runStepActions(page, remoteController, stepId, stepGroup) {
   logLine(`STEP ${stepId}: started`);
-  for (const action of stepGroup.actions) {
+  const defaultStepWaitMs = getDefaultStepWaitMs();
+  for (let index = 0; index < stepGroup.actions.length; index += 1) {
+    const action = stepGroup.actions[index];
     if (action.type === "remote") {
-      await pressRemoteKey(page, remoteController, action.key);
+      await pressRemoteKey(remoteController, action.key);
       logLine(`STEP ${stepId}: remote "${action.key}"`);
+      const nextAction = stepGroup.actions[index + 1];
+      const hasExplicitWait = nextAction?.type === "wait";
+      if (!hasExplicitWait && defaultStepWaitMs > 0) {
+        await page.waitForTimeout(defaultStepWaitMs);
+        logLine(`STEP ${stepId}: default wait ${defaultStepWaitMs}ms`);
+      }
     } else if (action.type === "wait") {
       await page.waitForTimeout(action.ms);
       logLine(`STEP ${stepId}: wait ${action.ms}ms`);
@@ -352,14 +817,15 @@ async function runStepActions(page, remoteController, stepId, stepGroup) {
 async function run() {
   fs.mkdirSync(runDir, { recursive: true });
   fs.mkdirSync(logsDir, { recursive: true });
-  fs.writeFileSync(runLogPath, "", "utf8");
-  const rl = readline.createInterface({ input, output });
-  const remoteController = useSamsungRemoteDriver() ? createSamsungRemoteController() : null;
-  console.log(
-    remoteController
-      ? "Remote input mode: samsung-tv-remote package (RM UI capture button still used)"
-      : "Remote input mode: RM UI remote map",
+  const preflightLogPath = path.join(
+    logsDir,
+    applyLogTemplate(logNaming.pendingTemplate || "capture-pending-{timestamp}.log", "pending"),
   );
+  fs.writeFileSync(preflightLogPath, "", "utf8");
+  runLogPath = preflightLogPath;
+  const rl = readline.createInterface({ input, output });
+  const remoteController = createSamsungRemoteController();
+  console.log("Remote input mode: samsung-tv-remote package (RM UI capture button still used)");
 
   const browser = await chromium.launch({ headless: false });
   const context = await browser.newContext({ viewport: null });
@@ -387,21 +853,28 @@ async function run() {
   });
 
   try {
-    const topicEntries = Array.isArray(topics)
+    const allTopicEntries = Array.isArray(topics)
       ? topics.map((topic, idx) => [topic.id || String(idx + 1), topic])
       : Object.entries(topics);
+    const allowedTopicSet = getAllowedTopicSet();
+    const topicEntries = allowedTopicSet
+      ? allTopicEntries.filter(([id]) => allowedTopicSet.has(String(id).toLowerCase()))
+      : allTopicEntries;
+    if (topicEntries.length === 0) {
+      throw new Error("No topics are available after applying topicPolicy.allowTopicIds.");
+    }
     const availableTopicIds = topicEntries.map(([id]) => id).join(", ");
-    let startTopicId = "";
+    let startTopicId = String(topicPolicy.defaultStartTopic || "").trim();
 
-    await ensureRemoteMapReady(page, rl);
-    const startAnswer = (
-      await rl.question(
-        `Press Enter to start from beginning, or type a topic number (${availableTopicIds}): `,
-      )
-    )
-      .trim()
-      .toLowerCase();
-    if (startAnswer) {
+    await ensureRemoteMapReady(page);
+    const promptText = isSingleTopicRun
+      ? `Type one topic number to run once (${availableTopicIds}): `
+      : `Press Enter to start from beginning, or type a topic number (${availableTopicIds}): `;
+    const startAnswer = (await rl.question(promptText)).trim().toLowerCase();
+    if ((runModes.requireTopicInSingleMode ?? true) && isSingleTopicRun && !startAnswer) {
+      throw new Error(`Single-topic mode requires a topic number. Available topics: ${availableTopicIds}`);
+    }
+    if (startAnswer || (isSingleTopicRun && (runModes.requireTopicInSingleMode ?? true))) {
       const matched = topicEntries.find(([id]) => id.toLowerCase() === startAnswer);
       if (!matched) {
         throw new Error(`Topic "${startAnswer}" not found. Available topics: ${availableTopicIds}`);
@@ -412,24 +885,73 @@ async function run() {
     let startIndex = 0;
     if (startTopicId) {
       startIndex = topicEntries.findIndex(([id]) => id === startTopicId);
+      if (startIndex < 0) {
+        throw new Error(`Default/start topic "${startTopicId}" not found. Available topics: ${availableTopicIds}`);
+      }
     }
+    const firstTopicId = topicEntries[startIndex]?.[0] || "unknown";
+    const detailedTemplate = isSingleTopicRun
+      ? logNaming.singleTopicDetailedTemplate || "capture-single-topic-{topicId}-detailed-{timestamp}.log"
+      : logNaming.startedTopicDetailedTemplate || "capture-started-topic-{topicId}-detailed-{timestamp}.log";
+    const summaryTemplate = isSingleTopicRun
+      ? logNaming.singleTopicSummaryTemplate || "capture-single-topic-{topicId}-{timestamp}.log"
+      : logNaming.startedTopicSummaryTemplate || "capture-started-topic-{topicId}-{timestamp}.log";
+    const detailedFilename = applyLogTemplate(detailedTemplate, firstTopicId) || `capture-run-detailed-${runStamp}.log`;
+    const summaryFilename = applyLogTemplate(summaryTemplate, firstTopicId) || `capture-run-summary-${runStamp}.log`;
+    const finalDetailedPath = path.join(logsDir, detailedFilename);
+    const finalSummaryPath = path.join(logsDir, summaryFilename);
+    if (runLogPath !== finalDetailedPath) {
+      fs.renameSync(runLogPath, finalDetailedPath);
+      runLogPath = finalDetailedPath;
+    }
+    fs.writeFileSync(finalSummaryPath, "", "utf8");
+    runSummaryLogPath = finalSummaryPath;
 
-    for (let i = startIndex; i < topicEntries.length; i += 1) {
+    const configuredMax = Number(topicPolicy.maxTopicsPerRun || 0);
+    const maxTopics = configuredMax > 0 ? configuredMax : Number.POSITIVE_INFINITY;
+    const runLimit = isSingleTopicRun ? 1 : maxTopics;
+    const endExclusive = Math.min(startIndex + runLimit, topicEntries.length);
+    const reusePlan = buildReusePlan(topicEntries, startIndex, endExclusive);
+    const reusePlanPath = path.join(logsDir, `reuse-plan-${runStamp}.json`);
+    fs.writeFileSync(
+      reusePlanPath,
+      JSON.stringify(
+        {
+          generatedAt: reusePlan.generatedAt,
+          totals: reusePlan.totals,
+          topicStats: reusePlan.topicStats,
+          decisions: Object.fromEntries(reusePlan.planByStepId.entries()),
+        },
+        null,
+        2,
+      ),
+      "utf8",
+    );
+    const { totals } = reusePlan;
+    logLine(
+      `REUSE PLAN: topics=${totals.topics}, steps=${totals.totalSteps}, captureEligible=${totals.captureEligibleSteps}, reusable=${totals.reusableSteps}, newCaptures=${totals.newCaptureSteps}`,
+    );
+    logLine(`REUSE PLAN FILE: ${path.relative(process.cwd(), reusePlanPath)}`);
+    console.log(
+      `Reuse plan ready: ${totals.reusableSteps}/${totals.captureEligibleSteps} capture-eligible steps will reuse existing captures.`,
+    );
+    console.log(`Reuse plan saved: ${reusePlanPath}`);
+
+    for (let i = startIndex; i < endExclusive; i += 1) {
       const [topicId, topicData] = topicEntries[i];
-      if (i > startIndex) {
-        const resetTopic = reset?.["0"];
-        if (resetTopic) {
-          logLine(`RESET before topic ${topicId}: started`);
-          const resetStepGroups = toStepGroups(resetTopic);
-          for (let resetStepIndex = 0; resetStepIndex < resetStepGroups.length; resetStepIndex += 1) {
-            const resetStepId = `reset-0-${resetStepIndex + 1}`;
-            await runStepActions(page, remoteController, resetStepId, resetStepGroups[resetStepIndex]);
-          }
-          logLine(`RESET before topic ${topicId}: finished`);
+      const resetTopic = reset?.["0"];
+      if (resetTopic && shouldRunResetForTopic(i, startIndex)) {
+        logLine(`RESET before topic ${topicId}: started`);
+        const resetStepGroups = toStepGroups(resetTopic);
+        for (let resetStepIndex = 0; resetStepIndex < resetStepGroups.length; resetStepIndex += 1) {
+          const resetStepId = `reset-0-${resetStepIndex + 1}`;
+          await runStepActions(page, remoteController, resetStepId, resetStepGroups[resetStepIndex]);
         }
+        logLine(`RESET before topic ${topicId}: finished`);
       }
       console.log(`Running topic: ${topicId}`);
       logLine(`TOPIC ${topicId}: started`);
+      logSummaryLine(`TOPIC ${topicId}: started`);
       const stepGroups = toStepGroups(topicData);
       for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
         const stepGroup = stepGroups[stepIndex];
@@ -439,41 +961,75 @@ async function run() {
         if (stepGroup.skipCapture) {
           logLine(`STEP ${stepId}: capture skipped`);
         } else {
+          const stepPlan = reusePlan.planByStepId.get(stepId);
+          if (stepPlan?.decision === "reuse" && stepPlan.sourceStepId) {
+            const reuseResult = tryReuseCapture(stepPlan.sourceStepId, stepId);
+            if (reuseResult.copied) {
+              const reuseMsg = `STEP ${stepId}: capture reused from ${stepPlan.sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
+              logLine(reuseMsg);
+              logSummaryLine(reuseMsg);
+              continue;
+            }
+            logCaptureFailure(
+              `STEP ${stepId}: reuse failed (${reuseResult.reason}), falling back to live capture`,
+            );
+          }
+
           let captureResult = { saved: false, reason: "not-attempted" };
           const maxAttempts = Math.max(1, stepGroup.captureRetries);
+          let preferExistingPopupRetry = false;
           for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            captureResult = await triggerRmCapture(page, context, stepId);
+            logLine(
+              `STEP ${stepId}: capture attempt ${attempt}/${maxAttempts} started`,
+            );
+            captureResult = await triggerRmCapture(page, context, remoteController, stepId, {
+                reuseExistingPopup: preferExistingPopupRetry,
+              }).catch((error) => ({
+              saved: false,
+              reason: error?.message || "capture-attempt-error",
+            }));
             if (captureResult.saved) {
               logLine(`STEP ${stepId}: capture saved on attempt ${attempt}`);
+              logSummaryLine(`STEP ${stepId}: capture saved`);
               break;
             }
-            logLine(`STEP ${stepId}: capture failed attempt ${attempt} (${captureResult.reason})`);
+            preferExistingPopupRetry = captureResult.reason === "popup-image-extraction-failed";
+            logCaptureFailure(
+              `STEP ${stepId}: capture failed attempt ${attempt} (${captureResult.reason})`,
+              false,
+            );
             if (attempt < maxAttempts) {
               await page.waitForTimeout(stepGroup.retryWaitMs);
             }
           }
           if (!captureResult.saved) {
-            logLine(`STEP ${stepId}: capture NOT saved (${captureResult.reason})`);
+            logCaptureFailure(`STEP ${stepId}: capture NOT saved (${captureResult.reason})`);
+            await closeCapturePopups(context, page);
           }
         }
       }
       logLine(`TOPIC ${topicId}: finished`);
 
-      // Continue automatically to the next topic.
+      // Continue automatically to the next topic (except in --single mode).
     }
 
     console.log(`Capture run complete: ${runDir}`);
-    console.log("All configured topics finished.");
+    if (isSingleTopicRun) {
+      console.log("Selected single topic finished.");
+    } else {
+      console.log("All configured topics finished.");
+    }
     logLine("FLOW finished");
-    console.log(`Run log saved: ${runLogPath}`);
-    const keepBrowserOpen = (process.env.KEEP_BROWSER_OPEN || "0").toLowerCase();
+    console.log(`Detailed run log: ${runLogPath}`);
+    if (runSummaryLogPath) console.log(`Summary run log: ${runSummaryLogPath}`);
+    const keepBrowserOpen = (process.env[capture.keepBrowserOpenEnv || "KEEP_BROWSER_OPEN"] || "0").toLowerCase();
     if (["1", "true", "yes", "y"].includes(keepBrowserOpen)) {
       await page.pause();
     }
   } finally {
     process.removeAllListeners("SIGINT");
     process.removeAllListeners("SIGTERM");
-    remoteController?.disconnect();
+    remoteController.disconnect();
     rl.close();
     await context.close();
     await browser.close();
