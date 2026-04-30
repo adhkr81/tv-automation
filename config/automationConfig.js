@@ -34,18 +34,31 @@ export const automationConfig = {
     popupFallbackLookupMs: 20000,
     popupDomReadyMs: 10000,
     popupInitialSettleMs: 2000,
-    popupImageReadyMs: 15000,
+    popupImageReadyMs: 25000,
+    /** Wait for window.blobImg after preview looks ready (RM sometimes sets blob shortly after decode). */
+    popupBlobImgWaitMs: 12000,
+    /** Hard cap for popup script extraction (fetch/blob/base64). */
+    popupEvaluateMs: 120000,
+    /** Per-fetch timeout inside the capture popup (preview URL / imgUrl endpoint). */
+    popupBlobFetchMs: 45000,
+    /** Playwright screenshot fallback — off by default; enable only if blob path cannot work. */
+    previewScreenshotMs: 30000,
     popupPostCloseMs: 5000,
     loadingVisibleMs: 6000,
     loadingHiddenMs: 45000,
     downloadMs: 8000,
+    defaultStepWaitMs: 800,
   },
 
   capture: {
     outputDir: "captures",
     retryAttempts: 3,
+    /** Per popup-open: in-page blob/canvas/fetch retries before giving up this invocation. */
+    popupExtractAttempts: 6,
+    /** Playwright #previewImg screenshot only when true (default: blob-only saves). */
+    enablePreviewScreenshotFallback: false,
     retryWaitMs: 800,
-    popupWaitMs: 1000,
+    popupWaitMs: 1500,
     keepBrowserOpenEnv: "KEEP_BROWSER_OPEN",
     heartbeatKey: "KEY_RED",
     heartbeatIntervalMs: 10000,
@@ -80,8 +93,10 @@ export const automationConfig = {
   },
 
   logNaming: {
-    startedTopicTemplate: "capture-started-topic-{topicId}-{timestamp}.log",
-    singleTopicTemplate: "capture-single-topic-{topicId}-{timestamp}.log",
+    startedTopicDetailedTemplate: "capture-started-topic-{topicId}-detailed-{timestamp}.log",
+    startedTopicSummaryTemplate: "capture-started-topic-{topicId}-{timestamp}.log",
+    singleTopicDetailedTemplate: "capture-single-topic-{topicId}-detailed-{timestamp}.log",
+    singleTopicSummaryTemplate: "capture-single-topic-{topicId}-{timestamp}.log",
     pendingTemplate: "capture-pending-{timestamp}.log",
   },
 
