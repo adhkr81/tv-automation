@@ -52,6 +52,12 @@ export const automationConfig = {
 
   capture: {
     outputDir: "captures",
+    modeOutputSubdirs: {
+      "2026tv": "2026tv",
+      "2025tv": "2025tv",
+    },
+    // Reused captures skip popup/download time; this wait keeps step timing stable.
+    reuseStepSettleMs: 1200,
     retryAttempts: 3,
     /** Per popup-open: in-page blob/canvas/fetch retries before giving up this invocation. */
     popupExtractAttempts: 6,

@@ -36,11 +36,11 @@ Playwright-based automation for the Samsung RMUS Remote Management portal. Navig
 | File | Purpose |
 |---|---|
 | `config/automationConfig.js` | Base URL, CSS selectors, delays, logging/network filters |
-| `scripts/topics.mjs` | Topic definitions — which remote key sequences to run and capture |
+| `scripts/2026tv.mjs` | Default topic definitions — which remote key sequences to run and capture |
 
 **Credentials** are read from environment variables (`RMUS_USERNAME`, `RMUS_PASSWORD`). Do not put them directly in `automationConfig.js`.
 
-### Topic format (`scripts/topics.mjs`)
+### Topic format (`scripts/<topics-file>.mjs`)
 
 Each topic is a keyed entry with an array of steps. Each step is either a bare action array (capture after every step) or an object that gives you more control:
 
@@ -83,7 +83,7 @@ Supported action types:
 ### Capture all topics
 
 ```powershell
-npm run capture:topics
+npm run capture
 ```
 
 This opens a headed Chromium window, navigates to the RMUS portal, and prompts you to:
@@ -92,7 +92,7 @@ This opens a headed Chromium window, navigates to the RMUS portal, and prompts y
 2. Enter the PIN/OTP manually when the portal asks (randomised each session)
 3. Press **Enter** in the terminal once you see the Remote Control page
 
-The script then runs through every topic in `scripts/topics.mjs`, pressing the configured remote keys and saving a screenshot after each step.
+The script then runs through every topic in the selected topics file (default: `scripts/2026tv.mjs`), pressing the configured remote keys and saving a screenshot after each step.
 
 ### Resume from a specific topic
 
@@ -105,7 +105,7 @@ Press Enter to start from beginning, or type a topic number (0, 1, 143, 200, 201
 ### Keep the browser open after a run
 
 ```powershell
-$env:KEEP_BROWSER_OPEN="1"; npm run capture:topics
+$env:KEEP_BROWSER_OPEN="1"; npm run capture
 ```
 
 ## Output
@@ -113,7 +113,7 @@ $env:KEEP_BROWSER_OPEN="1"; npm run capture:topics
 | Path | Contents |
 |---|---|
 | `captures/` | Screenshots named `<topicId>-<stepNumber>.(png\|jpg)` |
-| `logs/` | Per-run log file: `capture-run-<timestamp>.log` |
+| `logs/` | Per-run logs (detailed, summary, missed-captures) |
 
 Both folders are gitignored.
 
@@ -126,7 +126,8 @@ lib/
   helpers.js            # humanDelay, smartScroll, logEvent, popup dismissal, error logging
   loginFlow.js          # loginAndWaitAuthenticated — handles login + MFA polling
 scripts/
-  topics.mjs            # Topic definitions (remote sequences + capture options)
+  2026tv.mjs            # Default topic definitions (remote sequences + capture options)
+  2025tv.mjs            # Alternate topic definitions
   run-topic-captures.mjs # Main runner script
 playwright.config.js    # Playwright project config (chromium, storage state, etc.)
 ```
