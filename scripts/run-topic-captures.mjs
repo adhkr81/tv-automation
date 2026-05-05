@@ -198,7 +198,7 @@ async function waitForUrlIncludes(page, requiredPart, timeoutMs) {
   return false;
 }
 
-async function ensureRemoteMapReady(page) {
+async function ensureRemoteMapReady(page, rl) {
   await loginAndWaitAuthenticated(page, {
     interactivePinConfirmation: true,
   });
@@ -207,22 +207,6 @@ async function ensureRemoteMapReady(page) {
     if (!matched) {
       throw new Error(`Health check failed: URL does not include "${requiredPart}". Current URL: ${page.url()}`);
     }
-  }
-
-  // Only block on remote-control readiness selectors.
-  // Login selectors (e.g. #userId) may no longer exist after auth and should not block startup.
-  const blockingSelectors = Array.from(
-    new Set([
-      automationConfig.selectors.remoteMap,
-      automationConfig.selectors.remoteArea,
-      ...(healthChecks.requiredSelectors || []).filter((selector) => /remote|map|area/i.test(selector)),
-    ]),
-  ).filter(Boolean);
-  for (const selector of blockingSelectors) {
-    await page.locator(selector).first().waitFor({
-      state: "attached",
-      timeout: timeouts.remoteMapReadyMs ?? 60000,
-    });
   }
 
   await page.waitForTimeout(timeouts.initialPageSettleMs ?? 2000);
@@ -239,12 +223,30 @@ async function ensureRemoteMapReady(page) {
     }
   }
 
-  const remoteMap = page.locator(automationConfig.selectors.remoteMap);
-  await remoteMap.waitFor({ state: "attached", timeout: timeouts.remoteMapReadyMs ?? 60000 });
-  await page
-    .locator(automationConfig.selectors.remoteArea)
-    .first()
-    .waitFor({ state: "attached", timeout: timeouts.remoteMapReadyMs ?? 60000 });
+  // Wait for #btnGraphicCapture to be visible — this is the definitive sign the remote session
+  // is active and the UI is fully unlocked. map#remote_control_TV_US is present in static HTML
+  // even on the login page, so checking only DOM attachment is not sufficient.
+  // This also gives the user time to enter a PIN/OTP if the session needed a fresh login.
+  const readyTimeoutMs = timeouts.remoteMapReadyMs ?? 60000;
+  const captureReady = await page
+    .locator(automationConfig.selectors.captureButton)
+    .waitFor({ state: "visible", timeout: readyTimeoutMs })
+    .then(() => true)
+    .catch(() => false);
+
+  if (captureReady) {
+    console.log("Remote Control UI is ready (capture button visible).");
+  } else {
+    console.log(
+      `Remote Control UI not ready after ${readyTimeoutMs / 1000}s. The session may have expired or a PIN is still required.`,
+    );
+  }
+
+  await rl.question(
+    captureReady
+      ? "Press Enter to start topics… "
+      : "Complete login / enter PIN in the browser, then press Enter when the Remote Control page is fully loaded… ",
+  );
 }
 
 async function pressRemoteKey(remoteController, keyName) {
@@ -1013,7 +1015,9 @@ async function run() {
     const availableTopicIds = topicEntries.map(([id]) => id).join(", ");
     let startTopicId = String(topicPolicy.defaultStartTopic || "").trim();
 
-    await ensureRemoteMapReady(page);
+    await ensureRemoteMapReady(page, rl);
+    // Save session after the user confirms the remote control is ready.
+    // This captures fresh post-login/post-PIN cookies, not pre-PIN ones.
     if (shouldSaveSession) {
       fs.mkdirSync(path.dirname(storageStatePath), { recursive: true });
       await context.storageState({ path: storageStatePath });
