@@ -958,17 +958,20 @@ async function run() {
   const rl = readline.createInterface({ input, output });
   const remoteController = createSamsungRemoteController();
   console.log("Remote input mode: samsung-tv-remote package (RM UI capture button still used)");
-  const shouldReuseSession = isEnabledEnv("RMUS_REUSE_SESSION", false);
-  const shouldSaveSession = isEnabledEnv("RMUS_SAVE_SESSION", true);
   const storageStatePath = resolveSessionStorageStatePath();
+
+  const sessionFileExists = fs.existsSync(storageStatePath);
+  let shouldReuseSession = false;
+  if (sessionFileExists) {
+    const answer = (await rl.question("Reuse previous RMUS session? [Y/n]: ")).trim().toLowerCase();
+    shouldReuseSession = answer === "" || answer === "y" || answer === "yes";
+  }
 
   const browser = await chromium.launch({ headless: false });
   const contextOptions = { viewport: null };
-  if (shouldReuseSession && fs.existsSync(storageStatePath)) {
+  if (shouldReuseSession) {
     contextOptions.storageState = storageStatePath;
-    console.log(`Session reuse enabled. Loading storage state from: ${storageStatePath}`);
-  } else if (shouldReuseSession) {
-    console.log(`Session reuse enabled, but no state file found at: ${storageStatePath}`);
+    console.log(`Loading saved session from: ${storageStatePath}`);
   }
   const context = await browser.newContext(contextOptions);
   const page = await context.newPage();
@@ -1016,14 +1019,12 @@ async function run() {
     let startTopicId = String(topicPolicy.defaultStartTopic || "").trim();
 
     await ensureRemoteMapReady(page, rl);
-    // Save session after the user confirms the remote control is ready.
-    // This captures fresh post-login/post-PIN cookies, not pre-PIN ones.
-    if (shouldSaveSession) {
-      fs.mkdirSync(path.dirname(storageStatePath), { recursive: true });
-      await context.storageState({ path: storageStatePath });
-      logLine(`SESSION STATE: saved to ${storageStatePath}`);
-      console.log(`Session state saved: ${storageStatePath}`);
-    }
+    // Always save session after the remote control is ready so the next run can reuse it.
+    // Saved here (post-PIN) so the stored cookies are always fully authenticated.
+    fs.mkdirSync(path.dirname(storageStatePath), { recursive: true });
+    await context.storageState({ path: storageStatePath });
+    logLine(`SESSION STATE: saved to ${storageStatePath}`);
+    console.log(`Session state saved: ${storageStatePath}`);
     const promptText = isSingleTopicRun
       ? `Type one topic number to run once (${availableTopicIds}): `
       : `Press Enter to start from beginning, or type a topic number (${availableTopicIds}): `;
