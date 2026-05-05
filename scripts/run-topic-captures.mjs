@@ -23,7 +23,6 @@ const runLogDir = path.join(logsDir, `run-${runStamp}`);
 let runLogPath = "";
 let runSummaryLogPath = "";
 let runFailuresLogPath = "";
-const isSingleTopicRun = process.argv.includes("--single");
 let reset = {};
 let topics = {};
 const truthyValues = new Set(["1", "true", "yes", "y", "on"]);
@@ -1025,19 +1024,26 @@ async function run() {
     await context.storageState({ path: storageStatePath });
     logLine(`SESSION STATE: saved to ${storageStatePath}`);
     console.log(`Session state saved: ${storageStatePath}`);
-    const promptText = isSingleTopicRun
-      ? `Type one topic number to run once (${availableTopicIds}): `
-      : `Press Enter to start from beginning, or type a topic number (${availableTopicIds}): `;
+    const promptText = `Press Enter to start from beginning, or type a topic number (${availableTopicIds}): `;
     const startAnswer = (await rl.question(promptText)).trim().toLowerCase();
-    if ((runModes.requireTopicInSingleMode ?? true) && isSingleTopicRun && !startAnswer) {
-      throw new Error(`Single-topic mode requires a topic number. Available topics: ${availableTopicIds}`);
-    }
-    if (startAnswer || (isSingleTopicRun && (runModes.requireTopicInSingleMode ?? true))) {
+    let runSingleTopic = false;
+    if (startAnswer) {
       const matched = topicEntries.find(([id]) => id.toLowerCase() === startAnswer);
       if (!matched) {
         throw new Error(`Topic "${startAnswer}" not found. Available topics: ${availableTopicIds}`);
       }
       startTopicId = matched[0];
+      const modeAnswer = (
+        await rl.question(
+          `Choose run mode for topic ${startTopicId}:\n1. only this topic\n2. start from topic ${startTopicId}\nSelect option (1/2, default 2): `,
+        )
+      )
+        .trim()
+        .toLowerCase();
+      if (modeAnswer && modeAnswer !== "1" && modeAnswer !== "2") {
+        throw new Error(`Invalid run mode "${modeAnswer}". Choose 1 (only this topic) or 2 (start from topic).`);
+      }
+      runSingleTopic = modeAnswer === "1";
     }
 
     let startIndex = 0;
@@ -1048,13 +1054,13 @@ async function run() {
       }
     }
     const firstTopicId = topicEntries[startIndex]?.[0] || "unknown";
-    const detailedTemplate = isSingleTopicRun
+    const detailedTemplate = runSingleTopic
       ? logNaming.singleTopicDetailedTemplate || ""
       : logNaming.startedTopicDetailedTemplate || "";
-    const summaryTemplate = isSingleTopicRun
+    const summaryTemplate = runSingleTopic
       ? logNaming.singleTopicSummaryTemplate || ""
       : logNaming.startedTopicSummaryTemplate || "";
-    const failuresTemplate = isSingleTopicRun
+    const failuresTemplate = runSingleTopic
       ? logNaming.singleTopicMissedCapturesTemplate || ""
       : logNaming.startedTopicMissedCapturesTemplate || "";
     const detailedFilename = applyLogTemplate(detailedTemplate, firstTopicId) || "detailed.log";
@@ -1074,7 +1080,7 @@ async function run() {
 
     const configuredMax = Number(topicPolicy.maxTopicsPerRun || 0);
     const maxTopics = configuredMax > 0 ? configuredMax : Number.POSITIVE_INFINITY;
-    const runLimit = isSingleTopicRun ? 1 : maxTopics;
+    const runLimit = runSingleTopic ? 1 : maxTopics;
     const endExclusive = Math.min(startIndex + runLimit, topicEntries.length);
     const reusePlan = buildReusePlan(topicEntries, startIndex, endExclusive);
     const reusePlanPath = path.join(runLogDir, "reuse-plan.json");
@@ -1204,11 +1210,11 @@ async function run() {
       }
       logLine(`TOPIC ${topicId}: finished`);
 
-      // Continue automatically to the next topic (except in --single mode).
+      // Continue automatically to the next topic unless a single topic was selected at prompt.
     }
 
     console.log(`Capture run complete: ${runDir}`);
-    if (isSingleTopicRun) {
+    if (runSingleTopic) {
       console.log("Selected single topic finished.");
     } else {
       console.log("All configured topics finished.");
