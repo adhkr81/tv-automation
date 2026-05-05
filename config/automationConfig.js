@@ -69,7 +69,7 @@ export const automationConfig = {
     popupWaitMs: 1500,
     keepBrowserOpenEnv: "KEEP_BROWSER_OPEN",
     heartbeatKey: "KEY_RED",
-    heartbeatIntervalMs: 10000,
+    heartbeatIntervalMs: 8000,
   },
 
   runModes: {
