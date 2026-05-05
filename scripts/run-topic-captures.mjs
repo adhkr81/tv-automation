@@ -7,7 +7,6 @@ import { chromium } from "playwright";
 import samsungTvRemotePkg from "samsung-tv-remote";
 import { automationConfig } from "../config/automationConfig.js";
 import { loginAndWaitAuthenticated } from "../lib/loginFlow.js";
-import { reset, topics } from "./topics.mjs";
 
 dotenv.config();
 
@@ -15,14 +14,59 @@ const { SamsungTvRemote } = samsungTvRemotePkg;
 const { timeouts = {}, capture = {}, runModes = {}, topicPolicy = {}, healthChecks = {}, featureFlags = {}, logNaming = {} } =
   automationConfig;
 
-const outputRoot = path.join(process.cwd(), capture.outputDir || "captures");
-const runDir = outputRoot;
+const capturesRootDir = path.join(process.cwd(), capture.outputDir || "captures");
+let runDir = capturesRootDir;
 const logsDir = path.join(process.cwd(), "logs");
 /** Seconds-only stamp for filenames (no milliseconds suffix). */
 const runStamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
+const runLogDir = path.join(logsDir, `run-${runStamp}`);
 let runLogPath = "";
 let runSummaryLogPath = "";
+let runFailuresLogPath = "";
 const isSingleTopicRun = process.argv.includes("--single");
+let reset = {};
+let topics = {};
+
+function resolveTopicsFileName() {
+  const cliArg = process.argv.find((arg) => arg.startsWith("--topics="));
+  const rawValue = (cliArg?.slice("--topics=".length) || process.env.TOPICS_FILE || "2026tv").trim();
+  if (!rawValue) return "2026tv.mjs";
+  return rawValue.endsWith(".mjs") ? rawValue : `${rawValue}.mjs`;
+}
+
+function resolveRunDirForTopicsFile(topicsFileName) {
+  const topicsBaseName = path.parse(topicsFileName).name;
+  const modeOutputSubdirs = capture.modeOutputSubdirs || {};
+  const mappedSubdir =
+    modeOutputSubdirs[topicsFileName] ??
+    modeOutputSubdirs[topicsBaseName] ??
+    "";
+  const normalizedSubdir = String(mappedSubdir || "").trim();
+  if (!normalizedSubdir) return capturesRootDir;
+  return path.join(capturesRootDir, normalizedSubdir);
+}
+
+async function loadTopicInstructions() {
+  const topicsFileName = resolveTopicsFileName();
+  const topicsFilePath = path.join(process.cwd(), "scripts", topicsFileName);
+  if (!fs.existsSync(topicsFilePath)) {
+    throw new Error(
+      `Topics file not found: ${topicsFileName}. Expected path: ${topicsFilePath}`,
+    );
+  }
+
+  const topicsModule = await import(`./${topicsFileName}`);
+  const loadedTopics = topicsModule.topics;
+  const loadedReset = topicsModule.reset;
+  if (!loadedTopics || typeof loadedTopics !== "object") {
+    throw new Error(`Topics file "${topicsFileName}" must export a "topics" object.`);
+  }
+  if (!loadedReset || typeof loadedReset !== "object") {
+    throw new Error(`Topics file "${topicsFileName}" must export a "reset" object.`);
+  }
+
+  return { topicsFileName, loadedTopics, loadedReset };
+}
 
 function applyLogTemplate(template, topicId) {
   return String(template || "")
@@ -105,10 +149,17 @@ function logSummaryLine(message) {
   fs.appendFileSync(runSummaryLogPath, `[${ts}] ${message}\n`, "utf8");
 }
 
+function logFailuresLine(message) {
+  if (!runFailuresLogPath) return;
+  const ts = new Date().toISOString();
+  fs.appendFileSync(runFailuresLogPath, `[${ts}] ${message}\n`, "utf8");
+}
+
 /** @param {boolean} [alsoSummary] When false, only the detailed log is written (e.g. retry attempts). */
 function logCaptureFailure(message, alsoSummary = true) {
   const line = `***** ${message} *****`;
   logLine(line);
+  logFailuresLine(line);
   if (alsoSummary) logSummaryLine(line);
 }
 
@@ -367,7 +418,7 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
     const popupEvaluateMs = timeouts.popupEvaluateMs ?? 120000;
     const popupBlobFetchMs = timeouts.popupBlobFetchMs ?? 45000;
     const popupBlobImgWaitMs = timeouts.popupBlobImgWaitMs ?? 12000;
-    const popupExtractAttempts = Math.max(1, capture.popupExtractAttempts ?? 6);
+    const popupExtractAttempts = Math.max(1, capture.popupExtractAttempts ?? 8);
     const enablePreviewScreenshotFallback = capture.enablePreviewScreenshotFallback === true;
     let captureData = null;
     let previewScreenshotBuf = null;
@@ -649,20 +700,68 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
 
 function toStepGroups(topicData) {
   const topicSkipCapture = Boolean(topicData?.skipCapture);
+  const normalizeActionsAndCaptureOverrides = (actions = []) => {
+    const executableActions = [];
+    const overrides = {
+      skipCapture: null,
+      reuseImage: null,
+      skipLiveCapture: null,
+      captureRetries: null,
+      retryWaitMs: null,
+    };
+
+    for (const action of actions) {
+      if (action?.type !== "capture") {
+        executableActions.push(action);
+        continue;
+      }
+
+      const mode = String(action?.mode || "").toLowerCase();
+      if (mode === "skip") {
+        overrides.skipCapture = true;
+      } else if (mode === "reuse") {
+        overrides.reuseImage = action?.reuseImage || action?.sourceStepId || "previous";
+        overrides.skipLiveCapture = action?.skipLiveCapture ?? true;
+      }
+
+      if (typeof action?.captureRetries === "number") overrides.captureRetries = action.captureRetries;
+      if (typeof action?.retryWaitMs === "number") overrides.retryWaitMs = action.retryWaitMs;
+    }
+
+    return { executableActions, overrides };
+  };
+
   return (topicData?.steps || []).map((s) => {
     if (Array.isArray(s)) {
+      const { executableActions, overrides } = normalizeActionsAndCaptureOverrides(s);
       return {
-        actions: s,
-        captureRetries: capture.retryAttempts ?? 3,
-        retryWaitMs: capture.retryWaitMs ?? 800,
-        skipCapture: topicSkipCapture,
+        actions: executableActions,
+        captureRetries: overrides.captureRetries ?? (capture.retryAttempts ?? 4),
+        retryWaitMs: overrides.retryWaitMs ?? (capture.retryWaitMs ?? 800),
+        skipCapture: typeof overrides.skipCapture === "boolean" ? overrides.skipCapture : topicSkipCapture,
+        reuseImage: overrides.reuseImage,
+        skipLiveCapture: typeof overrides.skipLiveCapture === "boolean" ? overrides.skipLiveCapture : false,
       };
     }
+    const objectActions = Array.isArray(s.actions) ? s.actions : [];
+    const { executableActions, overrides } = normalizeActionsAndCaptureOverrides(objectActions);
     return {
-      actions: Array.isArray(s.actions) ? s.actions : [],
-      captureRetries: typeof s.captureRetries === "number" ? s.captureRetries : (capture.retryAttempts ?? 3),
-      retryWaitMs: typeof s.retryWaitMs === "number" ? s.retryWaitMs : (capture.retryWaitMs ?? 800),
-      skipCapture: typeof s.skipCapture === "boolean" ? s.skipCapture : topicSkipCapture,
+      actions: executableActions,
+      captureRetries:
+        typeof s.captureRetries === "number"
+          ? s.captureRetries
+          : (overrides.captureRetries ?? (capture.retryAttempts ?? 4)),
+      retryWaitMs:
+        typeof s.retryWaitMs === "number" ? s.retryWaitMs : (overrides.retryWaitMs ?? (capture.retryWaitMs ?? 800)),
+      skipCapture:
+        typeof s.skipCapture === "boolean"
+          ? s.skipCapture
+          : (typeof overrides.skipCapture === "boolean" ? overrides.skipCapture : topicSkipCapture),
+      reuseImage: s.reuseImage ?? overrides.reuseImage,
+      skipLiveCapture:
+        typeof s.skipLiveCapture === "boolean"
+          ? s.skipLiveCapture
+          : (typeof overrides.skipLiveCapture === "boolean" ? overrides.skipLiveCapture : false),
     };
   });
 }
@@ -814,12 +913,19 @@ async function runStepActions(page, remoteController, stepId, stepGroup) {
   }
 }
 
+async function waitAfterReuse(page, stepId) {
+  const settleMs = Math.max(0, Number(capture.reuseStepSettleMs ?? 0));
+  if (!settleMs) return;
+  await page.waitForTimeout(settleMs);
+  logLine(`STEP ${stepId}: post-reuse settle wait ${settleMs}ms`);
+}
+
 async function run() {
-  fs.mkdirSync(runDir, { recursive: true });
   fs.mkdirSync(logsDir, { recursive: true });
+  fs.mkdirSync(runLogDir, { recursive: true });
   const preflightLogPath = path.join(
-    logsDir,
-    applyLogTemplate(logNaming.pendingTemplate || "capture-pending-{timestamp}.log", "pending"),
+    runLogDir,
+    applyLogTemplate(logNaming.pendingTemplate || "pending-capture-{timestamp}.log", "pending"),
   );
   fs.writeFileSync(preflightLogPath, "", "utf8");
   runLogPath = preflightLogPath;
@@ -853,6 +959,13 @@ async function run() {
   });
 
   try {
+    const { topicsFileName, loadedTopics, loadedReset } = await loadTopicInstructions();
+    topics = loadedTopics;
+    reset = loadedReset;
+    runDir = resolveRunDirForTopicsFile(topicsFileName);
+    fs.mkdirSync(runDir, { recursive: true });
+    console.log(`Instructions file: scripts/${topicsFileName}`);
+    console.log(`Capture output dir: ${runDir}`);
     const allTopicEntries = Array.isArray(topics)
       ? topics.map((topic, idx) => [topic.id || String(idx + 1), topic])
       : Object.entries(topics);
@@ -891,28 +1004,35 @@ async function run() {
     }
     const firstTopicId = topicEntries[startIndex]?.[0] || "unknown";
     const detailedTemplate = isSingleTopicRun
-      ? logNaming.singleTopicDetailedTemplate || "capture-single-topic-{topicId}-detailed-{timestamp}.log"
-      : logNaming.startedTopicDetailedTemplate || "capture-started-topic-{topicId}-detailed-{timestamp}.log";
+      ? logNaming.singleTopicDetailedTemplate || ""
+      : logNaming.startedTopicDetailedTemplate || "";
     const summaryTemplate = isSingleTopicRun
-      ? logNaming.singleTopicSummaryTemplate || "capture-single-topic-{topicId}-{timestamp}.log"
-      : logNaming.startedTopicSummaryTemplate || "capture-started-topic-{topicId}-{timestamp}.log";
-    const detailedFilename = applyLogTemplate(detailedTemplate, firstTopicId) || `capture-run-detailed-${runStamp}.log`;
-    const summaryFilename = applyLogTemplate(summaryTemplate, firstTopicId) || `capture-run-summary-${runStamp}.log`;
-    const finalDetailedPath = path.join(logsDir, detailedFilename);
-    const finalSummaryPath = path.join(logsDir, summaryFilename);
+      ? logNaming.singleTopicSummaryTemplate || ""
+      : logNaming.startedTopicSummaryTemplate || "";
+    const failuresTemplate = isSingleTopicRun
+      ? logNaming.singleTopicMissedCapturesTemplate || ""
+      : logNaming.startedTopicMissedCapturesTemplate || "";
+    const detailedFilename = applyLogTemplate(detailedTemplate, firstTopicId) || "detailed.log";
+    const summaryFilename = applyLogTemplate(summaryTemplate, firstTopicId) || "summary.log";
+    const failuresFilename = applyLogTemplate(failuresTemplate, firstTopicId) || "missed-captures.log";
+    const finalDetailedPath = path.join(runLogDir, detailedFilename);
+    const finalSummaryPath = path.join(runLogDir, summaryFilename);
+    const finalFailuresPath = path.join(runLogDir, failuresFilename);
     if (runLogPath !== finalDetailedPath) {
       fs.renameSync(runLogPath, finalDetailedPath);
       runLogPath = finalDetailedPath;
     }
     fs.writeFileSync(finalSummaryPath, "", "utf8");
     runSummaryLogPath = finalSummaryPath;
+    fs.writeFileSync(finalFailuresPath, "", "utf8");
+    runFailuresLogPath = finalFailuresPath;
 
     const configuredMax = Number(topicPolicy.maxTopicsPerRun || 0);
     const maxTopics = configuredMax > 0 ? configuredMax : Number.POSITIVE_INFINITY;
     const runLimit = isSingleTopicRun ? 1 : maxTopics;
     const endExclusive = Math.min(startIndex + runLimit, topicEntries.length);
     const reusePlan = buildReusePlan(topicEntries, startIndex, endExclusive);
-    const reusePlanPath = path.join(logsDir, `reuse-plan-${runStamp}.json`);
+    const reusePlanPath = path.join(runLogDir, "reuse-plan.json");
     fs.writeFileSync(
       reusePlanPath,
       JSON.stringify(
@@ -937,6 +1057,7 @@ async function run() {
     );
     console.log(`Reuse plan saved: ${reusePlanPath}`);
 
+    let lastCapturedStepId = null;
     for (let i = startIndex; i < endExclusive; i += 1) {
       const [topicId, topicData] = topicEntries[i];
       const resetTopic = reset?.["0"];
@@ -958,6 +1079,31 @@ async function run() {
         const stepId = `${topicId}-${stepIndex + 1}`;
         await runStepActions(page, remoteController, stepId, stepGroup);
 
+        if (stepGroup.reuseImage) {
+          const requestedSource = String(stepGroup.reuseImage).trim();
+          const sourceStepId =
+            requestedSource.toLowerCase() === "previous" ? lastCapturedStepId : requestedSource;
+          if (sourceStepId) {
+            const reuseResult = tryReuseCapture(sourceStepId, stepId);
+            if (reuseResult.copied) {
+              const reuseMsg = `STEP ${stepId}: capture reused from ${sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
+              logLine(reuseMsg);
+              logSummaryLine(reuseMsg);
+              lastCapturedStepId = stepId;
+              await waitAfterReuse(page, stepId);
+              continue;
+            }
+            logCaptureFailure(`STEP ${stepId}: manual reuse failed (${reuseResult.reason})`);
+          } else {
+            logCaptureFailure(`STEP ${stepId}: manual reuse failed (no-previous-capture)`);
+          }
+
+          if (stepGroup.skipLiveCapture) {
+            logLine(`STEP ${stepId}: live capture skipped after manual reuse failure`);
+            continue;
+          }
+        }
+
         if (stepGroup.skipCapture) {
           logLine(`STEP ${stepId}: capture skipped`);
         } else {
@@ -968,6 +1114,8 @@ async function run() {
               const reuseMsg = `STEP ${stepId}: capture reused from ${stepPlan.sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
               logLine(reuseMsg);
               logSummaryLine(reuseMsg);
+              lastCapturedStepId = stepId;
+              await waitAfterReuse(page, stepId);
               continue;
             }
             logCaptureFailure(
@@ -991,6 +1139,7 @@ async function run() {
             if (captureResult.saved) {
               logLine(`STEP ${stepId}: capture saved on attempt ${attempt}`);
               logSummaryLine(`STEP ${stepId}: capture saved`);
+              lastCapturedStepId = stepId;
               break;
             }
             preferExistingPopupRetry = captureResult.reason === "popup-image-extraction-failed";
@@ -1022,6 +1171,8 @@ async function run() {
     logLine("FLOW finished");
     console.log(`Detailed run log: ${runLogPath}`);
     if (runSummaryLogPath) console.log(`Summary run log: ${runSummaryLogPath}`);
+    if (runFailuresLogPath) console.log(`Missed-captures run log: ${runFailuresLogPath}`);
+    console.log(`Run logs folder: ${runLogDir}`);
     const keepBrowserOpen = (process.env[capture.keepBrowserOpenEnv || "KEEP_BROWSER_OPEN"] || "0").toLowerCase();
     if (["1", "true", "yes", "y"].includes(keepBrowserOpen)) {
       await page.pause();
