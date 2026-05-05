@@ -26,6 +26,30 @@ let runFailuresLogPath = "";
 const isSingleTopicRun = process.argv.includes("--single");
 let reset = {};
 let topics = {};
+const truthyValues = new Set(["1", "true", "yes", "y", "on"]);
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** @returns {Promise<void>} */
+async function closeBrowserWithTimeout(browser, timeoutMs = 45000) {
+  await Promise.race([
+    browser.close().catch(() => {}),
+    delay(timeoutMs),
+  ]);
+}
+
+function isEnabledEnv(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw == null || String(raw).trim() === "") return fallback;
+  return truthyValues.has(String(raw).trim().toLowerCase());
+}
+
+function resolveSessionStorageStatePath() {
+  const configured = (process.env.RMUS_STORAGE_STATE_PATH || ".cache/rmus-storage-state.json").trim();
+  return path.isAbsolute(configured) ? configured : path.join(process.cwd(), configured);
+}
 
 function resolveTopicsFileName() {
   const cliArg = process.argv.find((arg) => arg.startsWith("--topics="));
@@ -932,9 +956,19 @@ async function run() {
   const rl = readline.createInterface({ input, output });
   const remoteController = createSamsungRemoteController();
   console.log("Remote input mode: samsung-tv-remote package (RM UI capture button still used)");
+  const shouldReuseSession = isEnabledEnv("RMUS_REUSE_SESSION", false);
+  const shouldSaveSession = isEnabledEnv("RMUS_SAVE_SESSION", true);
+  const storageStatePath = resolveSessionStorageStatePath();
 
   const browser = await chromium.launch({ headless: false });
-  const context = await browser.newContext({ viewport: null });
+  const contextOptions = { viewport: null };
+  if (shouldReuseSession && fs.existsSync(storageStatePath)) {
+    contextOptions.storageState = storageStatePath;
+    console.log(`Session reuse enabled. Loading storage state from: ${storageStatePath}`);
+  } else if (shouldReuseSession) {
+    console.log(`Session reuse enabled, but no state file found at: ${storageStatePath}`);
+  }
+  const context = await browser.newContext(contextOptions);
   const page = await context.newPage();
 
   const handleInterrupt = async (signal) => {
@@ -980,6 +1014,12 @@ async function run() {
     let startTopicId = String(topicPolicy.defaultStartTopic || "").trim();
 
     await ensureRemoteMapReady(page);
+    if (shouldSaveSession) {
+      fs.mkdirSync(path.dirname(storageStatePath), { recursive: true });
+      await context.storageState({ path: storageStatePath });
+      logLine(`SESSION STATE: saved to ${storageStatePath}`);
+      console.log(`Session state saved: ${storageStatePath}`);
+    }
     const promptText = isSingleTopicRun
       ? `Type one topic number to run once (${availableTopicIds}): `
       : `Press Enter to start from beginning, or type a topic number (${availableTopicIds}): `;
@@ -1173,21 +1213,25 @@ async function run() {
     if (runSummaryLogPath) console.log(`Summary run log: ${runSummaryLogPath}`);
     if (runFailuresLogPath) console.log(`Missed-captures run log: ${runFailuresLogPath}`);
     console.log(`Run logs folder: ${runLogDir}`);
-    const keepBrowserOpen = (process.env[capture.keepBrowserOpenEnv || "KEEP_BROWSER_OPEN"] || "0").toLowerCase();
-    if (["1", "true", "yes", "y"].includes(keepBrowserOpen)) {
-      await page.pause();
+    const keepBrowserOpenEnvName = capture.keepBrowserOpenEnv || "KEEP_BROWSER_OPEN";
+    if (isEnabledEnv(keepBrowserOpenEnvName, false)) {
+      await rl.question(
+        `${keepBrowserOpenEnvName}: browser left open. Press Enter in this terminal to close Chromium and exit… `,
+      );
     }
   } finally {
     process.removeAllListeners("SIGINT");
     process.removeAllListeners("SIGTERM");
     remoteController.disconnect();
     rl.close();
-    await context.close();
-    await browser.close();
+    await context.close().catch(() => {});
+    await closeBrowserWithTimeout(browser, 45000);
   }
 }
 
-run().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+run()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
