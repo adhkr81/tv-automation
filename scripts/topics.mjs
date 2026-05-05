@@ -129,7 +129,7 @@ export const topics = {
       [
         { type: "remote", key: "KEY_ENTER" },
         { type: "wait", ms: 900 },
-      ], // Screenshots end here; takes too long so goes back to menu
+      ],
       [
         {type: "remote", key: "KEY_ENTER" },
         {type: "wait", ms: 900 },
