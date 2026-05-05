@@ -29,6 +29,8 @@ export const automationConfig = {
     authStableNoAuthAfterMfaMs: 10000,
     authStableNoAuthWithoutMfaMs: 15000,
     remoteMapReadyMs: 60000,
+    /** Extra settle wait after #btnGraphicCapture becomes visible before starting topics. */
+    remoteReadySettleMs: 2000,
     startButtonPostClickMs: 1500,
     popupEventMs: 12000,
     popupFallbackLookupMs: 20000,

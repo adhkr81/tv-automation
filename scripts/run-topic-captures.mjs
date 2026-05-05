@@ -223,10 +223,10 @@ async function ensureRemoteMapReady(page, rl) {
     }
   }
 
-  // Wait for #btnGraphicCapture to be visible — this is the definitive sign the remote session
-  // is active and the UI is fully unlocked. map#remote_control_TV_US is present in static HTML
-  // even on the login page, so checking only DOM attachment is not sufficient.
-  // This also gives the user time to enter a PIN/OTP if the session needed a fresh login.
+  // Wait for #btnGraphicCapture to be visible — the definitive sign the remote session is active
+  // and the UI is fully unlocked. map#remote_control_TV_US exists in static HTML even on the
+  // login page, so DOM attachment alone is not a reliable readiness signal.
+  // The long timeout also gives the user time to enter a PIN/OTP if a fresh login was needed.
   const readyTimeoutMs = timeouts.remoteMapReadyMs ?? 60000;
   const captureReady = await page
     .locator(automationConfig.selectors.captureButton)
@@ -235,18 +235,18 @@ async function ensureRemoteMapReady(page, rl) {
     .catch(() => false);
 
   if (captureReady) {
-    console.log("Remote Control UI is ready (capture button visible).");
+    // Short buffer after the button appears to let the backend channel fully stabilise.
+    const settleMs = timeouts.remoteReadySettleMs ?? 2000;
+    console.log(`Remote Control UI is ready. Waiting ${settleMs}ms for backend to stabilise…`);
+    await page.waitForTimeout(settleMs);
   } else {
+    // Capture button never appeared — PIN still needed or session problem.
+    // Fall back to a manual gate so the user can complete login before topics begin.
     console.log(
-      `Remote Control UI not ready after ${readyTimeoutMs / 1000}s. The session may have expired or a PIN is still required.`,
+      `Remote Control UI not ready after ${readyTimeoutMs / 1000}s. Complete login / enter PIN in the browser.`,
     );
+    await rl.question("Press Enter once the Remote Control page is fully loaded and enabled… ");
   }
-
-  await rl.question(
-    captureReady
-      ? "Press Enter to start topics… "
-      : "Complete login / enter PIN in the browser, then press Enter when the Remote Control page is fully loaded… ",
-  );
 }
 
 async function pressRemoteKey(remoteController, keyName) {
