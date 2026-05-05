@@ -101,8 +101,8 @@ export const automationConfig = {
   },
 
   logNaming: {
-    startedTopicDetailedTemplate: "capture-started-topic-{topicId}-detailed-{timestamp}.log",
-    startedTopicSummaryTemplate: "capture-started-topic-{topicId}-{timestamp}.log",
+    startedTopicDetailedTemplate: "detailed.log",
+    startedTopicSummaryTemplate: "summarized.log",
     singleTopicDetailedTemplate: "capture-single-topic-{topicId}-detailed-{timestamp}.log",
     singleTopicSummaryTemplate: "capture-single-topic-{topicId}-{timestamp}.log",
     pendingTemplate: "capture-pending-{timestamp}.log",

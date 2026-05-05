@@ -17,8 +17,8 @@ const { timeouts = {}, capture = {}, runModes = {}, topicPolicy = {}, healthChec
 const capturesRootDir = path.join(process.cwd(), capture.outputDir || "captures");
 let runDir = capturesRootDir;
 const logsDir = path.join(process.cwd(), "logs");
-/** Seconds-only stamp for filenames (no milliseconds suffix). */
-const runStamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
+/** Minute-level stamp for run folder/log naming (no seconds or milliseconds). */
+const runStamp = new Date().toISOString().slice(0, 16).replace(/:/g, "-");
 const runLogDir = path.join(logsDir, `run-${runStamp}`);
 let runLogPath = "";
 let runSummaryLogPath = "";
