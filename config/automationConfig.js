@@ -29,6 +29,8 @@ export const automationConfig = {
     authStableNoAuthAfterMfaMs: 10000,
     authStableNoAuthWithoutMfaMs: 15000,
     remoteMapReadyMs: 60000,
+    /** Extra settle wait after #btnGraphicCapture becomes visible before starting topics. */
+    remoteReadySettleMs: 2000,
     startButtonPostClickMs: 1500,
     popupEventMs: 12000,
     popupFallbackLookupMs: 20000,
@@ -67,7 +69,7 @@ export const automationConfig = {
     popupWaitMs: 1500,
     keepBrowserOpenEnv: "KEEP_BROWSER_OPEN",
     heartbeatKey: "KEY_RED",
-    heartbeatIntervalMs: 10000,
+    heartbeatIntervalMs: 8000,
   },
 
   runModes: {
@@ -99,8 +101,8 @@ export const automationConfig = {
   },
 
   logNaming: {
-    startedTopicDetailedTemplate: "capture-started-topic-{topicId}-detailed-{timestamp}.log",
-    startedTopicSummaryTemplate: "capture-started-topic-{topicId}-{timestamp}.log",
+    startedTopicDetailedTemplate: "detailed.log",
+    startedTopicSummaryTemplate: "summarized.log",
     singleTopicDetailedTemplate: "capture-single-topic-{topicId}-detailed-{timestamp}.log",
     singleTopicSummaryTemplate: "capture-single-topic-{topicId}-{timestamp}.log",
     pendingTemplate: "capture-pending-{timestamp}.log",

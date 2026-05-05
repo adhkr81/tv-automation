@@ -17,15 +17,38 @@ const { timeouts = {}, capture = {}, runModes = {}, topicPolicy = {}, healthChec
 const capturesRootDir = path.join(process.cwd(), capture.outputDir || "captures");
 let runDir = capturesRootDir;
 const logsDir = path.join(process.cwd(), "logs");
-/** Seconds-only stamp for filenames (no milliseconds suffix). */
-const runStamp = new Date().toISOString().slice(0, 19).replace(/:/g, "-");
+/** Minute-level stamp for run folder/log naming (no seconds or milliseconds). */
+const runStamp = new Date().toISOString().slice(0, 16).replace(/:/g, "-");
 const runLogDir = path.join(logsDir, `run-${runStamp}`);
 let runLogPath = "";
 let runSummaryLogPath = "";
 let runFailuresLogPath = "";
-const isSingleTopicRun = process.argv.includes("--single");
 let reset = {};
 let topics = {};
+const truthyValues = new Set(["1", "true", "yes", "y", "on"]);
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** @returns {Promise<void>} */
+async function closeBrowserWithTimeout(browser, timeoutMs = 45000) {
+  await Promise.race([
+    browser.close().catch(() => {}),
+    delay(timeoutMs),
+  ]);
+}
+
+function isEnabledEnv(name, fallback = false) {
+  const raw = process.env[name];
+  if (raw == null || String(raw).trim() === "") return fallback;
+  return truthyValues.has(String(raw).trim().toLowerCase());
+}
+
+function resolveSessionStorageStatePath() {
+  const configured = (process.env.RMUS_STORAGE_STATE_PATH || ".cache/rmus-storage-state.json").trim();
+  return path.isAbsolute(configured) ? configured : path.join(process.cwd(), configured);
+}
 
 function resolveTopicsFileName() {
   const cliArg = process.argv.find((arg) => arg.startsWith("--topics="));
@@ -174,7 +197,7 @@ async function waitForUrlIncludes(page, requiredPart, timeoutMs) {
   return false;
 }
 
-async function ensureRemoteMapReady(page) {
+async function ensureRemoteMapReady(page, rl) {
   await loginAndWaitAuthenticated(page, {
     interactivePinConfirmation: true,
   });
@@ -183,22 +206,6 @@ async function ensureRemoteMapReady(page) {
     if (!matched) {
       throw new Error(`Health check failed: URL does not include "${requiredPart}". Current URL: ${page.url()}`);
     }
-  }
-
-  // Only block on remote-control readiness selectors.
-  // Login selectors (e.g. #userId) may no longer exist after auth and should not block startup.
-  const blockingSelectors = Array.from(
-    new Set([
-      automationConfig.selectors.remoteMap,
-      automationConfig.selectors.remoteArea,
-      ...(healthChecks.requiredSelectors || []).filter((selector) => /remote|map|area/i.test(selector)),
-    ]),
-  ).filter(Boolean);
-  for (const selector of blockingSelectors) {
-    await page.locator(selector).first().waitFor({
-      state: "attached",
-      timeout: timeouts.remoteMapReadyMs ?? 60000,
-    });
   }
 
   await page.waitForTimeout(timeouts.initialPageSettleMs ?? 2000);
@@ -215,12 +222,30 @@ async function ensureRemoteMapReady(page) {
     }
   }
 
-  const remoteMap = page.locator(automationConfig.selectors.remoteMap);
-  await remoteMap.waitFor({ state: "attached", timeout: timeouts.remoteMapReadyMs ?? 60000 });
-  await page
-    .locator(automationConfig.selectors.remoteArea)
-    .first()
-    .waitFor({ state: "attached", timeout: timeouts.remoteMapReadyMs ?? 60000 });
+  // Wait for #btnGraphicCapture to be visible — the definitive sign the remote session is active
+  // and the UI is fully unlocked. map#remote_control_TV_US exists in static HTML even on the
+  // login page, so DOM attachment alone is not a reliable readiness signal.
+  // The long timeout also gives the user time to enter a PIN/OTP if a fresh login was needed.
+  const readyTimeoutMs = timeouts.remoteMapReadyMs ?? 60000;
+  const captureReady = await page
+    .locator(automationConfig.selectors.captureButton)
+    .waitFor({ state: "visible", timeout: readyTimeoutMs })
+    .then(() => true)
+    .catch(() => false);
+
+  if (captureReady) {
+    // Short buffer after the button appears to let the backend channel fully stabilise.
+    const settleMs = timeouts.remoteReadySettleMs ?? 2000;
+    console.log(`Remote Control UI is ready. Waiting ${settleMs}ms for backend to stabilise…`);
+    await page.waitForTimeout(settleMs);
+  } else {
+    // Capture button never appeared — PIN still needed or session problem.
+    // Fall back to a manual gate so the user can complete login before topics begin.
+    console.log(
+      `Remote Control UI not ready after ${readyTimeoutMs / 1000}s. Complete login / enter PIN in the browser.`,
+    );
+    await rl.question("Press Enter once the Remote Control page is fully loaded and enabled… ");
+  }
 }
 
 async function pressRemoteKey(remoteController, keyName) {
@@ -932,9 +957,22 @@ async function run() {
   const rl = readline.createInterface({ input, output });
   const remoteController = createSamsungRemoteController();
   console.log("Remote input mode: samsung-tv-remote package (RM UI capture button still used)");
+  const storageStatePath = resolveSessionStorageStatePath();
+
+  const sessionFileExists = fs.existsSync(storageStatePath);
+  let shouldReuseSession = false;
+  if (sessionFileExists) {
+    const answer = (await rl.question("Reuse previous RMUS session? [Y/n]: ")).trim().toLowerCase();
+    shouldReuseSession = answer === "" || answer === "y" || answer === "yes";
+  }
 
   const browser = await chromium.launch({ headless: false });
-  const context = await browser.newContext({ viewport: null });
+  const contextOptions = { viewport: null };
+  if (shouldReuseSession) {
+    contextOptions.storageState = storageStatePath;
+    console.log(`Loading saved session from: ${storageStatePath}`);
+  }
+  const context = await browser.newContext(contextOptions);
   const page = await context.newPage();
 
   const handleInterrupt = async (signal) => {
@@ -979,20 +1017,33 @@ async function run() {
     const availableTopicIds = topicEntries.map(([id]) => id).join(", ");
     let startTopicId = String(topicPolicy.defaultStartTopic || "").trim();
 
-    await ensureRemoteMapReady(page);
-    const promptText = isSingleTopicRun
-      ? `Type one topic number to run once (${availableTopicIds}): `
-      : `Press Enter to start from beginning, or type a topic number (${availableTopicIds}): `;
+    await ensureRemoteMapReady(page, rl);
+    // Always save session after the remote control is ready so the next run can reuse it.
+    // Saved here (post-PIN) so the stored cookies are always fully authenticated.
+    fs.mkdirSync(path.dirname(storageStatePath), { recursive: true });
+    await context.storageState({ path: storageStatePath });
+    logLine(`SESSION STATE: saved to ${storageStatePath}`);
+    console.log(`Session state saved: ${storageStatePath}`);
+    const promptText = `Press Enter to start from beginning, or type a topic number (${availableTopicIds}): `;
     const startAnswer = (await rl.question(promptText)).trim().toLowerCase();
-    if ((runModes.requireTopicInSingleMode ?? true) && isSingleTopicRun && !startAnswer) {
-      throw new Error(`Single-topic mode requires a topic number. Available topics: ${availableTopicIds}`);
-    }
-    if (startAnswer || (isSingleTopicRun && (runModes.requireTopicInSingleMode ?? true))) {
+    let runSingleTopic = false;
+    if (startAnswer) {
       const matched = topicEntries.find(([id]) => id.toLowerCase() === startAnswer);
       if (!matched) {
         throw new Error(`Topic "${startAnswer}" not found. Available topics: ${availableTopicIds}`);
       }
       startTopicId = matched[0];
+      const modeAnswer = (
+        await rl.question(
+          `Choose run mode for topic ${startTopicId}:\n1. only this topic\n2. start from topic ${startTopicId}\nSelect option (1/2, default 2): `,
+        )
+      )
+        .trim()
+        .toLowerCase();
+      if (modeAnswer && modeAnswer !== "1" && modeAnswer !== "2") {
+        throw new Error(`Invalid run mode "${modeAnswer}". Choose 1 (only this topic) or 2 (start from topic).`);
+      }
+      runSingleTopic = modeAnswer === "1";
     }
 
     let startIndex = 0;
@@ -1003,13 +1054,13 @@ async function run() {
       }
     }
     const firstTopicId = topicEntries[startIndex]?.[0] || "unknown";
-    const detailedTemplate = isSingleTopicRun
+    const detailedTemplate = runSingleTopic
       ? logNaming.singleTopicDetailedTemplate || ""
       : logNaming.startedTopicDetailedTemplate || "";
-    const summaryTemplate = isSingleTopicRun
+    const summaryTemplate = runSingleTopic
       ? logNaming.singleTopicSummaryTemplate || ""
       : logNaming.startedTopicSummaryTemplate || "";
-    const failuresTemplate = isSingleTopicRun
+    const failuresTemplate = runSingleTopic
       ? logNaming.singleTopicMissedCapturesTemplate || ""
       : logNaming.startedTopicMissedCapturesTemplate || "";
     const detailedFilename = applyLogTemplate(detailedTemplate, firstTopicId) || "detailed.log";
@@ -1029,7 +1080,7 @@ async function run() {
 
     const configuredMax = Number(topicPolicy.maxTopicsPerRun || 0);
     const maxTopics = configuredMax > 0 ? configuredMax : Number.POSITIVE_INFINITY;
-    const runLimit = isSingleTopicRun ? 1 : maxTopics;
+    const runLimit = runSingleTopic ? 1 : maxTopics;
     const endExclusive = Math.min(startIndex + runLimit, topicEntries.length);
     const reusePlan = buildReusePlan(topicEntries, startIndex, endExclusive);
     const reusePlanPath = path.join(runLogDir, "reuse-plan.json");
@@ -1159,11 +1210,11 @@ async function run() {
       }
       logLine(`TOPIC ${topicId}: finished`);
 
-      // Continue automatically to the next topic (except in --single mode).
+      // Continue automatically to the next topic unless a single topic was selected at prompt.
     }
 
     console.log(`Capture run complete: ${runDir}`);
-    if (isSingleTopicRun) {
+    if (runSingleTopic) {
       console.log("Selected single topic finished.");
     } else {
       console.log("All configured topics finished.");
@@ -1173,21 +1224,25 @@ async function run() {
     if (runSummaryLogPath) console.log(`Summary run log: ${runSummaryLogPath}`);
     if (runFailuresLogPath) console.log(`Missed-captures run log: ${runFailuresLogPath}`);
     console.log(`Run logs folder: ${runLogDir}`);
-    const keepBrowserOpen = (process.env[capture.keepBrowserOpenEnv || "KEEP_BROWSER_OPEN"] || "0").toLowerCase();
-    if (["1", "true", "yes", "y"].includes(keepBrowserOpen)) {
-      await page.pause();
+    const keepBrowserOpenEnvName = capture.keepBrowserOpenEnv || "KEEP_BROWSER_OPEN";
+    if (isEnabledEnv(keepBrowserOpenEnvName, false)) {
+      await rl.question(
+        `${keepBrowserOpenEnvName}: browser left open. Press Enter in this terminal to close Chromium and exit… `,
+      );
     }
   } finally {
     process.removeAllListeners("SIGINT");
     process.removeAllListeners("SIGTERM");
     remoteController.disconnect();
     rl.close();
-    await context.close();
-    await browser.close();
+    await context.close().catch(() => {});
+    await closeBrowserWithTimeout(browser, 45000);
   }
 }
 
-run().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+run()
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
