@@ -3,9 +3,13 @@ export const reset = {
     skipCapture: true,
     steps: [
       [
-        { type: "remote", key: "KEY_CONTENTS" },
-        { type: "wait", ms: 900 },
-      ],
+        { type: "remote", key: "KEY_HOME" },
+        { type: "wait", ms: 700 },
+        { type: "remote", key: "KEY_ENTER" },
+        { type: "wait", ms: 700 },
+        { type: "remote", key: "KEY_HOME" },
+        { type: "wait", ms: 700 }
+      ]
     ],
   },
 }
@@ -84,11 +88,11 @@ export const topics = {
       ],
       [
         { type: "remote", key: "KEY_LEFT" },
-        { type: "wait", ms: 900 },
+        { type: "wait", ms: 800 },
         { type: "remote", key: "KEY_DOWN" },
-        { type: "wait", ms: 900 },
+        { type: "wait", ms: 800 },
         { type: "remote", key: "KEY_DOWN" },
-        { type: "wait", ms: 900 },
+        { type: "wait", ms: 800 },
       ],
       [
         { type: "remote", key: "KEY_ENTER" },
@@ -96,11 +100,11 @@ export const topics = {
       ],
       [
         { type: "remote", key: "KEY_ENTER" },
-        { type: "wait", ms: 900 },
+        { type: "wait", ms: 800 },
         { type: "remote", key: "KEY_DOWN" },
-        { type: "wait", ms: 900 },
+        { type: "wait", ms: 800 },
         { type: "remote", key: "KEY_DOWN" },
-        { type: "wait", ms: 900 },
+        { type: "wait", ms: 800 },
         { type: "remote", key: "KEY_DOWN" },
         { type: "wait", ms: 900 },
         { type: "remote", key: "KEY_DOWN" },
@@ -139,7 +143,7 @@ export const topics = {
       [
         { type: "remote", key: "KEY_ENTER" },
         { type: "wait", ms: 900 },
-      ],
+/      ],
     ],
   }
 };

@@ -4,7 +4,8 @@
   "type": "module",
   "description": "Samsung RMUS remote control automation and OSD capture tool",
   "scripts": {
-    "capture:topics": "node scripts/run-topic-captures.mjs"
+    "capture": "node scripts/run-topic-captures.mjs",
+    "capture-single": "node scripts/run-topic-captures.mjs --single"
   },
   "keywords": [],
   "author": "",
