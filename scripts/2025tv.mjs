@@ -17,7 +17,7 @@ export const reset = {
   
   //DEFAULT WAIT BETWEEN KEYS IS 800MS, ADD SPECIFIC WAITS FOR EACH STEP IF NEEDED
   export const topics = {
-    "2": {
+    "21": {
       steps: [
         [
             { type: "remote", key: "KEY_HOME" },
@@ -34,20 +34,32 @@ export const reset = {
           [
             { type: "remote", key: "KEY_ENTER" },
             { type: "remote", key: "KEY_DOWN" },
-            { type: "wait", ms: 500 },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "wait", ms: 700 },
           ],
         [
           { type: "remote", key: "KEY_ENTER" },
+          { type: "remote", key: "KEY_DOWN" },
+          { type: "wait", ms: 500 },
+        ],
+        [
+          { type: "remote", key: "KEY_ENTER" },
+          { type: "wait", ms: 500 },
         ],
         [
           { type: "remote", key: "KEY_DOWN" },
+          { type: "remote", key: "KEY_DOWN" },
+          { type: "remote", key: "KEY_DOWN" },
+          { type: "wait", ms: 500 },
         ],
         [
           { type: "remote", key: "KEY_ENTER" },
+          { type: "wait", ms: 800 },
         ],
         [
-          { type: "remote", key: "KEY_ENTER" },
-          { type: "wait", ms: 10000 },
+          { type: "capture", mode: "reuse", reuseImage: "previous" }
         ],
       ],
     },
@@ -161,5 +173,153 @@ export const reset = {
             ],
         ],
       },
-  };
+        "26": {
+          steps: [
+            [
+            { type: "remote", key: "KEY_HOME" },
+            ],
+            [
+              { type: "remote", key: "KEY_RIGHT" },
+              { type: "wait", ms: 500 },
+            ],
+            [
+              { type: "remote", key: "KEY_RIGHT" },
+              { type: "wait", ms: 500 },
+            ],
+            [
+              { type: "capture", mode: "reuse", reuseImage: "previous" }
+            ],
+          
+
+        ],
+      },
+          "20": {
+      steps: [
+          [
+            { type: "remote", key: "KEY_HOME" },
+          ],
+          [
+            { type: "remote", key: "KEY_LEFT" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "wait", ms: 700 },
+          ],
+          [
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "wait", ms: 700 },
+          ],
+          [
+            { type: "remote", key: "KEY_ENTER" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "wait", ms: 700 },
+          ],
+          [
+            { type: "remote", key: "KEY_ENTER" },
+            { type: "wait", ms: 1000 },
+          ],
+      ],
+    },
+    "29": {
+      steps: [
+          [
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "wait", ms: 500 },
+          ],
+          [
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "wait", ms: 500 },
+          ],
+          [
+            { type: "remote", key: "KEY_ENTER" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_LEFT" },
+            { type: "remote", key: "KEY_LEFT" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "wait", ms: 500 },
+          ],
+          [
+            { type: "remote", key: "KEY_ENTER" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "remote", key: "KEY_ENTER" },
+            { type: "remote", key: "KEY_ENTER" },
+            { type: "wait", ms: 500 },
+          ],
+          [
+            { type: "remote", key: "KEY_ENTER" },
+            { type: "remote", key: "KEY_ENTER" },
+            { type: "wait", ms: 500 },
+          ],
+          [
+            { type: "wait", ms: 500 },
+          ],
+      ],
+    },
+      "46": {
+      steps: [
+          [
+            { type: "remote", key: "KEY_HOME" },
+            { type: "wait", ms: 700 },
+          ],
+          [
+            { type: "remote", key: "KEY_LEFT" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "wait", ms: 700 },
+          ],
+          [
+            { type: "remote", key: "KEY_RIGHT" },
+            { type: "wait", ms: 700 },
+          ],
+          [
+            { type: "remote", key: "KEY_ENTER" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "wait", ms: 700 },
+          ],
+          [
+            { type: "remote", key: "KEY_ENTER" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "remote", key: "KEY_DOWN" },
+            { type: "wait", ms: 700 },
+          ],
+          [
+            { type: "remote", key: "KEY_ENTER" },
+            { type: "wait", ms: 700 },
+          ],
+      ],
+    },
+};
+
   
