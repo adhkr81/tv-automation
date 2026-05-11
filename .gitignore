@@ -28,3 +28,7 @@ captures/
 logs/
 *.log
 npm-debug.log*
+
+
+# Generated keyTracker JS files
+key-tracker-js-output/*.js
