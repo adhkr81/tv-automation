@@ -1,5 +1,5 @@
-"""run using this command: 
-python .\lib\keyTracker.py"""
+"""run using this command:
+python .\\lib\\keyTracker.py"""
 from __future__ import annotations
 import os
 import signal
@@ -26,9 +26,13 @@ KEY_NAMES = {
     "RIGHT": "Right",
     "HOME": "Home",
     "ENTER": "Enter",
+    "RETURN": "Return",
+    "BACK": "Back",
 }
 
 SHORTCUT_KEYS = {
+    "b": "RETURN",
+    "c": "CAPTURE_SCREEN",
     "w": "WAIT",
     "f": "FINISH",
     "i": "SET_INTERVAL",
@@ -195,6 +199,11 @@ def log_capture_reuse(reuse_image: str) -> None:
         )
 
 
+def log_capture_screen() -> None:
+    with LOG_FILE.open("a", encoding="utf-8") as log_file:
+        log_file.write(f'{ACTION_INDENT}{{ type: "capture", mode: "screen" }},\n')
+
+
 def finish_step() -> None:
     with LOG_FILE.open("a", encoding="utf-8") as log_file:
         log_file.write(f"{STEP_BLOCK_INDENT}],\n")
@@ -276,6 +285,8 @@ def describe_action(action: Action) -> str:
     if action_type == "wait":
         return f"Wait {value} ms"
     if action_type == "capture":
+        if value == "screen":
+            return "Screen capture"
         return f"Capture reuse {value}"
 
     return KEY_NAMES[str(value)]
@@ -295,8 +306,10 @@ def draw(
     print("F to finish current step.")
     print("I to set wait interval.")
     print("T to start the next topic.")
+    print("C to capture current screen.")
     print("P to capture previous image.")
     print('R to reuse images "1-3".')
+    print("B for Back/Return.")
     print("Backspace to undo the last action.")
     print("Q to end program.\n")
     print(f"Saving presses to: {log_file_display_path()}")
@@ -308,7 +321,7 @@ def draw(
     else:
         print("Current topic: not started\n")
 
-    for key in ("UP", "DOWN", "LEFT", "RIGHT", "HOME", "ENTER"):
+    for key in ("UP", "DOWN", "LEFT", "RIGHT", "HOME", "ENTER", "RETURN"):
         print(f"{KEY_NAMES[key]}: {counts[key]}")
 
     if last_key:
@@ -483,6 +496,14 @@ def main() -> int:
                 recent.appendleft(
                     f"{timestamp:%H:%M:%S} - Capture reuse {reuse_image}"
                 )
+                redraw()
+                continue
+
+            if key == "CAPTURE_SCREEN":
+                open_step_if_needed()
+                log_capture_screen()
+                current_step_actions.append(("capture", "screen"))
+                recent.appendleft(f"{timestamp:%H:%M:%S} - Screen capture")
                 redraw()
                 continue
 

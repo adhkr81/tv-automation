@@ -33,11 +33,15 @@ You can define each step in one of two ways:
 ### 3) Capture directive
 
 ```js
+{ type: "capture", mode: "screen" }
 { type: "capture", mode: "skip" }
 { type: "capture", mode: "reuse", reuseImage: "previous" }
 { type: "capture", mode: "reuse", reuseImage: "1-3" }
 ```
 
+- `mode: "screen"`: force a fresh live RM screen capture for this step.
+  - Aliases: `mode: "live"` and `mode: "now"`.
+  - Use it as its own step when you want to capture the current screen between remote actions.
 - `mode: "skip"`: skip capture for this step.
 - `mode: "reuse"`: copy an existing saved image instead of live popup/blob capture.
   - `reuseImage: "previous"`: reuse the most recently saved capture in this run.
@@ -69,7 +73,8 @@ These can be declared in object steps, and for array steps some can also be decl
 
 ## Priority / Behavior Notes
 
-- Capture directives are parsed from step arrays and converted into step-level behavior.
+- Capture directives are parsed from step arrays and converted into step-level behavior. Capture happens after the step's remote/wait actions finish.
+- `mode: "screen"` forces live capture and bypasses automatic capture reuse for that step.
 - If `reuseImage` is set, reuse is attempted first.
 - If reuse succeeds, step capture is completed without blob/popup capture.
 - If reuse fails:
@@ -77,6 +82,24 @@ These can be declared in object steps, and for array steps some can also be decl
   - with `skipLiveCapture: false` -> live capture is attempted.
 
 ## Examples
+
+### Capture the current screen in its own step
+
+```js
+[
+  { type: "capture", mode: "screen" }
+]
+```
+
+### Press Back/Return, then capture the resulting screen
+
+```js
+[
+  { type: "remote", key: "KEY_RETURN" },
+  { type: "wait", ms: 700 },
+  { type: "capture", mode: "screen" }
+]
+```
 
 ### Skip capture in an array step
 
