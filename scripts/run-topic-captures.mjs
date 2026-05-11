@@ -733,6 +733,7 @@ function toStepGroups(topicData) {
       skipLiveCapture: null,
       captureRetries: null,
       retryWaitMs: null,
+      forceLiveCapture: null,
     };
 
     for (const action of actions) {
@@ -744,9 +745,17 @@ function toStepGroups(topicData) {
       const mode = String(action?.mode || "").toLowerCase();
       if (mode === "skip") {
         overrides.skipCapture = true;
+        overrides.reuseImage = null;
+        overrides.forceLiveCapture = false;
       } else if (mode === "reuse") {
         overrides.reuseImage = action?.reuseImage || action?.sourceStepId || "previous";
         overrides.skipLiveCapture = action?.skipLiveCapture ?? true;
+        overrides.forceLiveCapture = false;
+      } else if (["screen", "live", "now"].includes(mode)) {
+        overrides.skipCapture = false;
+        overrides.reuseImage = null;
+        overrides.skipLiveCapture = false;
+        overrides.forceLiveCapture = true;
       }
 
       if (typeof action?.captureRetries === "number") overrides.captureRetries = action.captureRetries;
@@ -766,6 +775,7 @@ function toStepGroups(topicData) {
         skipCapture: typeof overrides.skipCapture === "boolean" ? overrides.skipCapture : topicSkipCapture,
         reuseImage: overrides.reuseImage,
         skipLiveCapture: typeof overrides.skipLiveCapture === "boolean" ? overrides.skipLiveCapture : false,
+        forceLiveCapture: typeof overrides.forceLiveCapture === "boolean" ? overrides.forceLiveCapture : false,
       };
     }
     const objectActions = Array.isArray(s.actions) ? s.actions : [];
@@ -787,6 +797,10 @@ function toStepGroups(topicData) {
         typeof s.skipLiveCapture === "boolean"
           ? s.skipLiveCapture
           : (typeof overrides.skipLiveCapture === "boolean" ? overrides.skipLiveCapture : false),
+      forceLiveCapture:
+        typeof s.forceLiveCapture === "boolean"
+          ? s.forceLiveCapture
+          : (typeof overrides.forceLiveCapture === "boolean" ? overrides.forceLiveCapture : false),
     };
   });
 }
@@ -856,6 +870,18 @@ function buildReusePlan(topicEntries, startIndex, endExclusive) {
       captureEligibleSteps += 1;
       topicCaptureEligible += 1;
       const fingerprint = buildStepFingerprint(resetApplied, prefixActionSignatures);
+
+      if (stepGroup.forceLiveCapture) {
+        fingerprintToSourceStepId.set(fingerprint, stepId);
+        planByStepId.set(stepId, {
+          decision: "capture",
+          sourceStepId: null,
+          fingerprint,
+          forceLiveCapture: true,
+        });
+        continue;
+      }
+
       const sourceStepId = fingerprintToSourceStepId.get(fingerprint) || null;
 
       if (sourceStepId) {
@@ -1159,7 +1185,7 @@ async function run() {
           logLine(`STEP ${stepId}: capture skipped`);
         } else {
           const stepPlan = reusePlan.planByStepId.get(stepId);
-          if (stepPlan?.decision === "reuse" && stepPlan.sourceStepId) {
+          if (!stepGroup.forceLiveCapture && stepPlan?.decision === "reuse" && stepPlan.sourceStepId) {
             const reuseResult = tryReuseCapture(stepPlan.sourceStepId, stepId);
             if (reuseResult.copied) {
               const reuseMsg = `STEP ${stepId}: capture reused from ${stepPlan.sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
