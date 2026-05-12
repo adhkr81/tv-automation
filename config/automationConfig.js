@@ -29,26 +29,47 @@ export const automationConfig = {
     authStableNoAuthAfterMfaMs: 10000,
     authStableNoAuthWithoutMfaMs: 15000,
     remoteMapReadyMs: 60000,
+    /** Extra settle wait after #btnGraphicCapture becomes visible before starting topics. */
+    remoteReadySettleMs: 2000,
     startButtonPostClickMs: 1500,
     popupEventMs: 12000,
     popupFallbackLookupMs: 20000,
     popupDomReadyMs: 10000,
     popupInitialSettleMs: 2000,
-    popupImageReadyMs: 15000,
+    popupImageReadyMs: 25000,
+    /** Wait for window.blobImg after preview looks ready (RM sometimes sets blob shortly after decode). */
+    popupBlobImgWaitMs: 12000,
+    /** Hard cap for popup script extraction (fetch/blob/base64). */
+    popupEvaluateMs: 120000,
+    /** Per-fetch timeout inside the capture popup (preview URL / imgUrl endpoint). */
+    popupBlobFetchMs: 45000,
+    /** Playwright screenshot fallback — off by default; enable only if blob path cannot work. */
+    previewScreenshotMs: 30000,
     popupPostCloseMs: 5000,
     loadingVisibleMs: 6000,
     loadingHiddenMs: 45000,
     downloadMs: 8000,
+    defaultStepWaitMs: 800,
   },
 
   capture: {
     outputDir: "captures",
+    modeOutputSubdirs: {
+      "2026tv": "2026tv",
+      "2025tv": "2025tv",
+    },
+    // Reused captures skip popup/download time; this wait keeps step timing stable.
+    reuseStepSettleMs: 1200,
     retryAttempts: 3,
+    /** Per popup-open: in-page blob/canvas/fetch retries before giving up this invocation. */
+    popupExtractAttempts: 6,
+    /** Playwright #previewImg screenshot only when true (default: blob-only saves). */
+    enablePreviewScreenshotFallback: false,
     retryWaitMs: 800,
-    popupWaitMs: 1000,
+    popupWaitMs: 1500,
     keepBrowserOpenEnv: "KEEP_BROWSER_OPEN",
     heartbeatKey: "KEY_RED",
-    heartbeatIntervalMs: 10000,
+    heartbeatIntervalMs: 8000,
   },
 
   runModes: {
@@ -80,8 +101,10 @@ export const automationConfig = {
   },
 
   logNaming: {
-    startedTopicTemplate: "capture-started-topic-{topicId}-{timestamp}.log",
-    singleTopicTemplate: "capture-single-topic-{topicId}-{timestamp}.log",
+    startedTopicDetailedTemplate: "detailed.log",
+    startedTopicSummaryTemplate: "summarized.log",
+    singleTopicDetailedTemplate: "capture-single-topic-{topicId}-detailed-{timestamp}.log",
+    singleTopicSummaryTemplate: "capture-single-topic-{topicId}-{timestamp}.log",
     pendingTemplate: "capture-pending-{timestamp}.log",
   },
 
