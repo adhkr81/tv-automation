@@ -97,6 +97,48 @@ function applyLogTemplate(template, topicId) {
     .replaceAll("{timestamp}", runStamp);
 }
 
+function formatTopicLabel(topicId, topicData) {
+  const rawLabel = topicData?.slug || topicData?.topic || "";
+  const label = String(rawLabel).trim();
+  return label ? `${topicId}: ${label}` : String(topicId);
+}
+
+function getTopicSlug(topicData) {
+  return String(topicData?.slug || "").trim();
+}
+
+function logTopicStarted(topicId, topicData) {
+  const topicSlug = getTopicSlug(topicData);
+  if (topicSlug) {
+    logLine(`TOPIC SLUG: ${topicSlug}`);
+    logSummaryLine(`TOPIC SLUG: ${topicSlug}`);
+  }
+  logLine(`TOPIC ${topicId}: started`);
+  logSummaryLine(`TOPIC ${topicId}: started`);
+}
+
+function getPrefixedTopicNumber(topicId) {
+  const match = String(topicId || "").trim().toLowerCase().match(/^[a-z]+_(\d+)$/);
+  return match?.[1] || null;
+}
+
+function findTopicEntry(topicEntries, rawTopicId) {
+  const requestedTopicId = String(rawTopicId || "").trim().toLowerCase();
+  if (!requestedTopicId) return null;
+
+  const exactMatch = topicEntries.find(([id]) => String(id).toLowerCase() === requestedTopicId);
+  if (exactMatch) return exactMatch;
+  if (!/^\d+$/.test(requestedTopicId)) return null;
+
+  const aliasMatches = topicEntries.filter(([id]) => getPrefixedTopicNumber(id) === requestedTopicId);
+  if (aliasMatches.length > 1) {
+    const matchingTopicIds = aliasMatches.map(([id]) => id).join(", ");
+    throw new Error(`Topic "${rawTopicId}" is ambiguous. Matching topics: ${matchingTopicIds}`);
+  }
+
+  return aliasMatches[0] || null;
+}
+
 function shouldRunResetForTopic(topicIndex, startIndex) {
   if (topicIndex === startIndex) return runModes.runResetBeforeFirstTopic !== false;
   return runModes.runResetBetweenTopics !== false;
@@ -1054,7 +1096,7 @@ async function run() {
     const startAnswer = (await rl.question(promptText)).trim().toLowerCase();
     let runSingleTopic = false;
     if (startAnswer) {
-      const matched = topicEntries.find(([id]) => id.toLowerCase() === startAnswer);
+      const matched = findTopicEntry(topicEntries, startAnswer);
       if (!matched) {
         throw new Error(`Topic "${startAnswer}" not found. Available topics: ${availableTopicIds}`);
       }
@@ -1074,10 +1116,12 @@ async function run() {
 
     let startIndex = 0;
     if (startTopicId) {
-      startIndex = topicEntries.findIndex(([id]) => id === startTopicId);
-      if (startIndex < 0) {
+      const matchedStartTopic = findTopicEntry(topicEntries, startTopicId);
+      if (!matchedStartTopic) {
         throw new Error(`Default/start topic "${startTopicId}" not found. Available topics: ${availableTopicIds}`);
       }
+      startTopicId = matchedStartTopic[0];
+      startIndex = topicEntries.findIndex(([id]) => id === startTopicId);
     }
     const firstTopicId = topicEntries[startIndex]?.[0] || "unknown";
     const detailedTemplate = runSingleTopic
@@ -1147,9 +1191,8 @@ async function run() {
         }
         logLine(`RESET before topic ${topicId}: finished`);
       }
-      console.log(`Running topic: ${topicId}`);
-      logLine(`TOPIC ${topicId}: started`);
-      logSummaryLine(`TOPIC ${topicId}: started`);
+      console.log(`Running topic: ${formatTopicLabel(topicId, topicData)}`);
+      logTopicStarted(topicId, topicData);
       const stepGroups = toStepGroups(topicData);
       for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
         const stepGroup = stepGroups[stepIndex];
