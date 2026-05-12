@@ -765,84 +765,79 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
   return { saved, reason };
 }
 
+function normalizeCaptureMode(action = {}) {
+  const mode = String(action?.mode || "auto").trim().toLowerCase();
+  if (["screen", "live", "now"].includes(mode)) return "screen";
+  if (["auto", "capture"].includes(mode)) return "auto";
+  if (mode === "reuse") return "reuse";
+  if (mode === "skip") return "skip";
+  return "auto";
+}
+
+function normalizeCaptureAction(action = {}, defaults = {}) {
+  const hasMode = action?.mode != null && String(action.mode).trim() !== "";
+  const mode =
+    defaults.forceLiveCapture && !hasMode
+      ? "screen"
+      : normalizeCaptureMode(action);
+  return {
+    ...action,
+    type: "capture",
+    mode,
+    reuseImage: action?.reuseImage ?? action?.sourceStepId ?? defaults.reuseImage ?? null,
+    skipLiveCapture:
+      typeof action?.skipLiveCapture === "boolean"
+        ? action.skipLiveCapture
+        : (typeof defaults.skipLiveCapture === "boolean" ? defaults.skipLiveCapture : mode === "reuse"),
+    captureRetries:
+      typeof action?.captureRetries === "number"
+        ? action.captureRetries
+        : defaults.captureRetries,
+    retryWaitMs:
+      typeof action?.retryWaitMs === "number"
+        ? action.retryWaitMs
+        : defaults.retryWaitMs,
+  };
+}
+
+function normalizeStepActions(actions = [], defaults = {}) {
+  return actions
+    .filter(Boolean)
+    .map((action) => (action?.type === "capture" ? normalizeCaptureAction(action, defaults) : action));
+}
+
 function toStepGroups(topicData) {
-  const topicSkipCapture = Boolean(topicData?.skipCapture);
-  const normalizeActionsAndCaptureOverrides = (actions = []) => {
-    const executableActions = [];
-    const overrides = {
-      skipCapture: null,
-      reuseImage: null,
-      skipLiveCapture: null,
-      captureRetries: null,
-      retryWaitMs: null,
-      forceLiveCapture: null,
-    };
-
-    for (const action of actions) {
-      if (action?.type !== "capture") {
-        executableActions.push(action);
-        continue;
-      }
-
-      const mode = String(action?.mode || "").toLowerCase();
-      if (mode === "skip") {
-        overrides.skipCapture = true;
-        overrides.reuseImage = null;
-        overrides.forceLiveCapture = false;
-      } else if (mode === "reuse") {
-        overrides.reuseImage = action?.reuseImage || action?.sourceStepId || "previous";
-        overrides.skipLiveCapture = action?.skipLiveCapture ?? true;
-        overrides.forceLiveCapture = false;
-      } else if (["screen", "live", "now"].includes(mode)) {
-        overrides.skipCapture = false;
-        overrides.reuseImage = null;
-        overrides.skipLiveCapture = false;
-        overrides.forceLiveCapture = true;
-      }
-
-      if (typeof action?.captureRetries === "number") overrides.captureRetries = action.captureRetries;
-      if (typeof action?.retryWaitMs === "number") overrides.retryWaitMs = action.retryWaitMs;
-    }
-
-    return { executableActions, overrides };
+  const baseDefaults = {
+    captureRetries: capture.retryAttempts ?? 4,
+    retryWaitMs: capture.retryWaitMs ?? 800,
+    reuseImage: null,
+    skipLiveCapture: null,
+    forceLiveCapture: false,
   };
 
   return (topicData?.steps || []).map((s) => {
     if (Array.isArray(s)) {
-      const { executableActions, overrides } = normalizeActionsAndCaptureOverrides(s);
       return {
-        actions: executableActions,
-        captureRetries: overrides.captureRetries ?? (capture.retryAttempts ?? 4),
-        retryWaitMs: overrides.retryWaitMs ?? (capture.retryWaitMs ?? 800),
-        skipCapture: typeof overrides.skipCapture === "boolean" ? overrides.skipCapture : topicSkipCapture,
-        reuseImage: overrides.reuseImage,
-        skipLiveCapture: typeof overrides.skipLiveCapture === "boolean" ? overrides.skipLiveCapture : false,
-        forceLiveCapture: typeof overrides.forceLiveCapture === "boolean" ? overrides.forceLiveCapture : false,
+        actions: normalizeStepActions(s, baseDefaults),
       };
     }
+
     const objectActions = Array.isArray(s.actions) ? s.actions : [];
-    const { executableActions, overrides } = normalizeActionsAndCaptureOverrides(objectActions);
-    return {
-      actions: executableActions,
+    const stepDefaults = {
       captureRetries:
         typeof s.captureRetries === "number"
           ? s.captureRetries
-          : (overrides.captureRetries ?? (capture.retryAttempts ?? 4)),
+          : baseDefaults.captureRetries,
       retryWaitMs:
-        typeof s.retryWaitMs === "number" ? s.retryWaitMs : (overrides.retryWaitMs ?? (capture.retryWaitMs ?? 800)),
-      skipCapture:
-        typeof s.skipCapture === "boolean"
-          ? s.skipCapture
-          : (typeof overrides.skipCapture === "boolean" ? overrides.skipCapture : topicSkipCapture),
-      reuseImage: s.reuseImage ?? overrides.reuseImage,
+        typeof s.retryWaitMs === "number" ? s.retryWaitMs : baseDefaults.retryWaitMs,
+      reuseImage: s.reuseImage ?? null,
       skipLiveCapture:
-        typeof s.skipLiveCapture === "boolean"
-          ? s.skipLiveCapture
-          : (typeof overrides.skipLiveCapture === "boolean" ? overrides.skipLiveCapture : false),
+        typeof s.skipLiveCapture === "boolean" ? s.skipLiveCapture : null,
       forceLiveCapture:
-        typeof s.forceLiveCapture === "boolean"
-          ? s.forceLiveCapture
-          : (typeof overrides.forceLiveCapture === "boolean" ? overrides.forceLiveCapture : false),
+        typeof s.forceLiveCapture === "boolean" ? s.forceLiveCapture : false,
+    };
+    return {
+      actions: normalizeStepActions(objectActions, stepDefaults),
     };
   });
 }
@@ -858,11 +853,10 @@ function getDefaultStepWaitMs() {
   return Math.max(0, Number(timeouts.defaultStepWaitMs ?? 800));
 }
 
-function getNormalizedStepActionSignatures(actions) {
-  const signatures = [];
+function appendNormalizedActionSignatures(signatures, actions, index) {
   const defaultStepWaitMs = getDefaultStepWaitMs();
-  for (let index = 0; index < actions.length; index += 1) {
-    const action = actions[index];
+  const action = actions[index];
+  if (action?.type === "remote" || action?.type === "wait") {
     signatures.push(actionToSignature(action));
     if (action?.type === "remote") {
       const nextAction = actions[index + 1];
@@ -872,7 +866,10 @@ function getNormalizedStepActionSignatures(actions) {
       }
     }
   }
-  return signatures;
+}
+
+function getCaptureId(stepId, captureOrdinal) {
+  return captureOrdinal <= 1 ? stepId : `${stepId}-capture${captureOrdinal}`;
 }
 
 function buildStepFingerprint(resetApplied, actionSignatures) {
@@ -881,7 +878,7 @@ function buildStepFingerprint(resetApplied, actionSignatures) {
 
 function buildReusePlan(topicEntries, startIndex, endExclusive) {
   const fingerprintToSourceStepId = new Map();
-  const planByStepId = new Map();
+  const planByCaptureId = new Map();
   const topicStats = [];
   let totalSteps = 0;
   let captureEligibleSteps = 0;
@@ -898,49 +895,65 @@ function buildReusePlan(topicEntries, startIndex, endExclusive) {
       const stepGroup = stepGroups[stepIndex];
       const stepId = `${topicId}-${stepIndex + 1}`;
       totalSteps += 1;
-      const normalizedActionSignatures = getNormalizedStepActionSignatures(stepGroup.actions);
-      prefixActionSignatures.push(...normalizedActionSignatures);
-      if (stepGroup.skipCapture) {
-        planByStepId.set(stepId, {
-          decision: "skip-capture",
-          sourceStepId: null,
-          fingerprint: null,
-        });
-        continue;
-      }
+      let savingCaptureOrdinal = 0;
 
-      captureEligibleSteps += 1;
-      topicCaptureEligible += 1;
-      const fingerprint = buildStepFingerprint(resetApplied, prefixActionSignatures);
+      for (let actionIndex = 0; actionIndex < stepGroup.actions.length; actionIndex += 1) {
+        const action = stepGroup.actions[actionIndex];
+        if (action?.type !== "capture") {
+          appendNormalizedActionSignatures(prefixActionSignatures, stepGroup.actions, actionIndex);
+          continue;
+        }
 
-      if (stepGroup.forceLiveCapture) {
-        fingerprintToSourceStepId.set(fingerprint, stepId);
-        planByStepId.set(stepId, {
-          decision: "capture",
-          sourceStepId: null,
-          fingerprint,
-          forceLiveCapture: true,
-        });
-        continue;
-      }
+        const mode = normalizeCaptureMode(action);
+        if (mode === "skip") continue;
 
-      const sourceStepId = fingerprintToSourceStepId.get(fingerprint) || null;
+        savingCaptureOrdinal += 1;
+        const captureId = getCaptureId(stepId, savingCaptureOrdinal);
+        captureEligibleSteps += 1;
+        topicCaptureEligible += 1;
+        const fingerprint = buildStepFingerprint(resetApplied, prefixActionSignatures);
 
-      if (sourceStepId) {
-        reusableSteps += 1;
-        topicReusable += 1;
-        planByStepId.set(stepId, {
-          decision: "reuse",
-          sourceStepId,
-          fingerprint,
-        });
-      } else {
-        fingerprintToSourceStepId.set(fingerprint, stepId);
-        planByStepId.set(stepId, {
-          decision: "capture",
-          sourceStepId: null,
-          fingerprint,
-        });
+        if (mode === "reuse") {
+          reusableSteps += 1;
+          topicReusable += 1;
+          fingerprintToSourceStepId.set(fingerprint, captureId);
+          planByCaptureId.set(captureId, {
+            decision: "manual-reuse",
+            sourceStepId: action.reuseImage || "previous",
+            fingerprint,
+          });
+          continue;
+        }
+
+        if (mode === "screen") {
+          fingerprintToSourceStepId.set(fingerprint, captureId);
+          planByCaptureId.set(captureId, {
+            decision: "capture",
+            sourceStepId: null,
+            fingerprint,
+            forceLiveCapture: true,
+          });
+          continue;
+        }
+
+        const sourceStepId = fingerprintToSourceStepId.get(fingerprint) || null;
+
+        if (sourceStepId) {
+          reusableSteps += 1;
+          topicReusable += 1;
+          planByCaptureId.set(captureId, {
+            decision: "reuse",
+            sourceStepId,
+            fingerprint,
+          });
+        } else {
+          fingerprintToSourceStepId.set(fingerprint, captureId);
+          planByCaptureId.set(captureId, {
+            decision: "capture",
+            sourceStepId: null,
+            fingerprint,
+          });
+        }
       }
     }
     topicStats.push({
@@ -961,7 +974,7 @@ function buildReusePlan(topicEntries, startIndex, endExclusive) {
       newCaptureSteps: captureEligibleSteps - reusableSteps,
     },
     topicStats,
-    planByStepId,
+    planByCaptureId,
   };
 }
 
@@ -985,9 +998,93 @@ function tryReuseCapture(sourceStepId, targetStepId) {
   return { copied: true, sourcePath, targetPath };
 }
 
-async function runStepActions(page, remoteController, stepId, stepGroup) {
+async function runCaptureAction(page, context, remoteController, captureId, action, reusePlan, captureState) {
+  const mode = normalizeCaptureMode(action);
+  if (mode === "skip") {
+    logLine(`STEP ${captureId}: capture skipped`);
+    return;
+  }
+
+  if (mode === "reuse") {
+    const requestedSource = String(action.reuseImage || action.sourceStepId || "previous").trim();
+    const sourceStepId =
+      requestedSource.toLowerCase() === "previous" ? captureState.lastCapturedStepId : requestedSource;
+    if (sourceStepId) {
+      const reuseResult = tryReuseCapture(sourceStepId, captureId);
+      if (reuseResult.copied) {
+        const reuseMsg = `STEP ${captureId}: capture reused from ${sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
+        logLine(reuseMsg);
+        logSummaryLine(reuseMsg);
+        captureState.lastCapturedStepId = captureId;
+        await waitAfterReuse(page, captureId);
+        return;
+      }
+      logCaptureFailure(`STEP ${captureId}: manual reuse failed (${reuseResult.reason})`);
+    } else {
+      logCaptureFailure(`STEP ${captureId}: manual reuse failed (no-previous-capture)`);
+    }
+
+    if (action.skipLiveCapture !== false) {
+      logLine(`STEP ${captureId}: live capture skipped after manual reuse failure`);
+      return;
+    }
+  }
+
+  const capturePlan = reusePlan?.planByCaptureId?.get(captureId);
+  if (mode === "auto" && capturePlan?.decision === "reuse" && capturePlan.sourceStepId) {
+    const reuseResult = tryReuseCapture(capturePlan.sourceStepId, captureId);
+    if (reuseResult.copied) {
+      const reuseMsg = `STEP ${captureId}: capture reused from ${capturePlan.sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
+      logLine(reuseMsg);
+      logSummaryLine(reuseMsg);
+      captureState.lastCapturedStepId = captureId;
+      await waitAfterReuse(page, captureId);
+      return;
+    }
+    logCaptureFailure(
+      `STEP ${captureId}: reuse failed (${reuseResult.reason}), falling back to live capture`,
+    );
+  }
+
+  let captureResult = { saved: false, reason: "not-attempted" };
+  const maxAttempts = Math.max(1, action.captureRetries ?? (capture.retryAttempts ?? 4));
+  const retryWaitMs = Math.max(0, action.retryWaitMs ?? (capture.retryWaitMs ?? 800));
+  let preferExistingPopupRetry = false;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    logLine(
+      `STEP ${captureId}: capture attempt ${attempt}/${maxAttempts} started`,
+    );
+    captureResult = await triggerRmCapture(page, context, remoteController, captureId, {
+      reuseExistingPopup: preferExistingPopupRetry,
+    }).catch((error) => ({
+      saved: false,
+      reason: error?.message || "capture-attempt-error",
+    }));
+    if (captureResult.saved) {
+      logLine(`STEP ${captureId}: capture saved on attempt ${attempt}`);
+      logSummaryLine(`STEP ${captureId}: capture saved`);
+      captureState.lastCapturedStepId = captureId;
+      break;
+    }
+    preferExistingPopupRetry = captureResult.reason === "popup-image-extraction-failed";
+    logCaptureFailure(
+      `STEP ${captureId}: capture failed attempt ${attempt} (${captureResult.reason})`,
+      false,
+    );
+    if (attempt < maxAttempts) {
+      await page.waitForTimeout(retryWaitMs);
+    }
+  }
+  if (!captureResult.saved) {
+    logCaptureFailure(`STEP ${captureId}: capture NOT saved (${captureResult.reason})`);
+    await closeCapturePopups(context, page);
+  }
+}
+
+async function runStepActions(page, context, remoteController, stepId, stepGroup, options = {}) {
   logLine(`STEP ${stepId}: started`);
   const defaultStepWaitMs = getDefaultStepWaitMs();
+  let savingCaptureOrdinal = 0;
   for (let index = 0; index < stepGroup.actions.length; index += 1) {
     const action = stepGroup.actions[index];
     if (action.type === "remote") {
@@ -1002,6 +1099,21 @@ async function runStepActions(page, remoteController, stepId, stepGroup) {
     } else if (action.type === "wait") {
       await page.waitForTimeout(action.ms);
       logLine(`STEP ${stepId}: wait ${action.ms}ms`);
+    } else if (action.type === "capture") {
+      const mode = normalizeCaptureMode(action);
+      const captureId =
+        mode === "skip"
+          ? stepId
+          : getCaptureId(stepId, ++savingCaptureOrdinal);
+      await runCaptureAction(
+        page,
+        context,
+        remoteController,
+        captureId,
+        action,
+        options.reusePlan,
+        options.captureState || { lastCapturedStepId: null },
+      );
     }
   }
 }
@@ -1161,7 +1273,7 @@ async function run() {
           generatedAt: reusePlan.generatedAt,
           totals: reusePlan.totals,
           topicStats: reusePlan.topicStats,
-          decisions: Object.fromEntries(reusePlan.planByStepId.entries()),
+          decisions: Object.fromEntries(reusePlan.planByCaptureId.entries()),
         },
         null,
         2,
@@ -1170,15 +1282,15 @@ async function run() {
     );
     const { totals } = reusePlan;
     logLine(
-      `REUSE PLAN: topics=${totals.topics}, steps=${totals.totalSteps}, captureEligible=${totals.captureEligibleSteps}, reusable=${totals.reusableSteps}, newCaptures=${totals.newCaptureSteps}`,
+      `REUSE PLAN: topics=${totals.topics}, steps=${totals.totalSteps}, capturePoints=${totals.captureEligibleSteps}, reusable=${totals.reusableSteps}, newCaptures=${totals.newCaptureSteps}`,
     );
     logLine(`REUSE PLAN FILE: ${path.relative(process.cwd(), reusePlanPath)}`);
     console.log(
-      `Reuse plan ready: ${totals.reusableSteps}/${totals.captureEligibleSteps} capture-eligible steps will reuse existing captures.`,
+      `Reuse plan ready: ${totals.reusableSteps}/${totals.captureEligibleSteps} explicit capture points will reuse existing captures.`,
     );
     console.log(`Reuse plan saved: ${reusePlanPath}`);
 
-    let lastCapturedStepId = null;
+    const captureState = { lastCapturedStepId: null };
     for (let i = startIndex; i < endExclusive; i += 1) {
       const [topicId, topicData] = topicEntries[i];
       const resetTopic = reset?.["0"];
@@ -1187,7 +1299,9 @@ async function run() {
         const resetStepGroups = toStepGroups(resetTopic);
         for (let resetStepIndex = 0; resetStepIndex < resetStepGroups.length; resetStepIndex += 1) {
           const resetStepId = `reset-0-${resetStepIndex + 1}`;
-          await runStepActions(page, remoteController, resetStepId, resetStepGroups[resetStepIndex]);
+          await runStepActions(page, context, remoteController, resetStepId, resetStepGroups[resetStepIndex], {
+            captureState,
+          });
         }
         logLine(`RESET before topic ${topicId}: finished`);
       }
@@ -1197,85 +1311,10 @@ async function run() {
       for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
         const stepGroup = stepGroups[stepIndex];
         const stepId = `${topicId}-${stepIndex + 1}`;
-        await runStepActions(page, remoteController, stepId, stepGroup);
-
-        if (stepGroup.reuseImage) {
-          const requestedSource = String(stepGroup.reuseImage).trim();
-          const sourceStepId =
-            requestedSource.toLowerCase() === "previous" ? lastCapturedStepId : requestedSource;
-          if (sourceStepId) {
-            const reuseResult = tryReuseCapture(sourceStepId, stepId);
-            if (reuseResult.copied) {
-              const reuseMsg = `STEP ${stepId}: capture reused from ${sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
-              logLine(reuseMsg);
-              logSummaryLine(reuseMsg);
-              lastCapturedStepId = stepId;
-              await waitAfterReuse(page, stepId);
-              continue;
-            }
-            logCaptureFailure(`STEP ${stepId}: manual reuse failed (${reuseResult.reason})`);
-          } else {
-            logCaptureFailure(`STEP ${stepId}: manual reuse failed (no-previous-capture)`);
-          }
-
-          if (stepGroup.skipLiveCapture) {
-            logLine(`STEP ${stepId}: live capture skipped after manual reuse failure`);
-            continue;
-          }
-        }
-
-        if (stepGroup.skipCapture) {
-          logLine(`STEP ${stepId}: capture skipped`);
-        } else {
-          const stepPlan = reusePlan.planByStepId.get(stepId);
-          if (!stepGroup.forceLiveCapture && stepPlan?.decision === "reuse" && stepPlan.sourceStepId) {
-            const reuseResult = tryReuseCapture(stepPlan.sourceStepId, stepId);
-            if (reuseResult.copied) {
-              const reuseMsg = `STEP ${stepId}: capture reused from ${stepPlan.sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
-              logLine(reuseMsg);
-              logSummaryLine(reuseMsg);
-              lastCapturedStepId = stepId;
-              await waitAfterReuse(page, stepId);
-              continue;
-            }
-            logCaptureFailure(
-              `STEP ${stepId}: reuse failed (${reuseResult.reason}), falling back to live capture`,
-            );
-          }
-
-          let captureResult = { saved: false, reason: "not-attempted" };
-          const maxAttempts = Math.max(1, stepGroup.captureRetries);
-          let preferExistingPopupRetry = false;
-          for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            logLine(
-              `STEP ${stepId}: capture attempt ${attempt}/${maxAttempts} started`,
-            );
-            captureResult = await triggerRmCapture(page, context, remoteController, stepId, {
-                reuseExistingPopup: preferExistingPopupRetry,
-              }).catch((error) => ({
-              saved: false,
-              reason: error?.message || "capture-attempt-error",
-            }));
-            if (captureResult.saved) {
-              logLine(`STEP ${stepId}: capture saved on attempt ${attempt}`);
-              logSummaryLine(`STEP ${stepId}: capture saved`);
-              lastCapturedStepId = stepId;
-              break;
-            }
-            preferExistingPopupRetry = captureResult.reason === "popup-image-extraction-failed";
-            logCaptureFailure(
-              `STEP ${stepId}: capture failed attempt ${attempt} (${captureResult.reason})`,
-              false,
-            );
-            if (attempt < maxAttempts) {
-              await page.waitForTimeout(stepGroup.retryWaitMs);
-            }
-          }
-          if (!captureResult.saved) {
-            logCaptureFailure(`STEP ${stepId}: capture NOT saved (${captureResult.reason})`);
-            await closeCapturePopups(context, page);
-          }
-        }
+        await runStepActions(page, context, remoteController, stepId, stepGroup, {
+          reusePlan,
+          captureState,
+        });
       }
       logLine(`TOPIC ${topicId}: finished`);
 

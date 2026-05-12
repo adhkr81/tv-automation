@@ -8,9 +8,10 @@ You can define each step in one of two ways:
 
 1. **Array step (recommended, consistent style)**
    - A list of action/directive objects.
+   - Captures are only taken where a `capture` directive appears.
 2. **Object step**
    - `{ actions: [...], ...options }`
-   - Useful when you want explicit step-level options.
+   - Useful when you want default retry/reuse options for capture directives inside `actions`.
 
 ## Action/Directive Types (inside `actions` or array step)
 
@@ -33,16 +34,19 @@ You can define each step in one of two ways:
 ### 3) Capture directive
 
 ```js
+{ type: "capture" }
+{ type: "capture", mode: "auto" }
 { type: "capture", mode: "screen" }
 { type: "capture", mode: "skip" }
 { type: "capture", mode: "reuse", reuseImage: "previous" }
 { type: "capture", mode: "reuse", reuseImage: "1-3" }
 ```
 
-- `mode: "screen"`: force a fresh live RM screen capture for this step.
+- Missing `mode` or `mode: "auto"`: capture at this point; automatic reuse may be used when the reuse plan detects an identical screen state.
+- `mode: "screen"`: force a fresh live RM screen capture at this point.
   - Aliases: `mode: "live"` and `mode: "now"`.
   - Use it as its own step when you want to capture the current screen between remote actions.
-- `mode: "skip"`: skip capture for this step.
+- `mode: "skip"`: explicitly skip capture at this point. This is mostly useful for generated files; plain remote/wait arrays do not capture by default.
 - `mode: "reuse"`: copy an existing saved image instead of live popup/blob capture.
   - `reuseImage: "previous"`: reuse the most recently saved capture in this run.
   - `reuseImage: "<topic>-<step>"`: reuse from a specific step ID (example: `"1-3"`).
@@ -59,27 +63,27 @@ These can be declared in object steps, and for array steps some can also be decl
   actions: [...],
   captureRetries: 4,
   retryWaitMs: 800,
-  skipCapture: false,
   reuseImage: "previous",
   skipLiveCapture: true
 }
 ```
 
-- `captureRetries`: max live capture attempts for this step.
+- `captureRetries`: default max live capture attempts for capture directives in this step.
 - `retryWaitMs`: wait time between retry attempts.
-- `skipCapture`: skip capture for this step.
 - `reuseImage`: manual reuse source (`"previous"` or `"topic-step"`).
 - `skipLiveCapture`: when reuse fails, skip live capture (`true`) or fallback (`false`).
 
 ## Priority / Behavior Notes
 
-- Capture directives are parsed from step arrays and converted into step-level behavior. Capture happens after the step's remote/wait actions finish.
-- `mode: "screen"` forces live capture and bypasses automatic capture reuse for that step.
+- There is no automatic capture at the end of a step.
+- Capture directives run inline. Actions listed after a capture directive still run after that capture finishes.
+- `mode: "screen"` forces live capture and bypasses automatic capture reuse for that capture point.
 - If `reuseImage` is set, reuse is attempted first.
-- If reuse succeeds, step capture is completed without blob/popup capture.
+- If reuse succeeds, the capture point is completed without blob/popup capture.
 - If reuse fails:
   - with `skipLiveCapture: true` -> live capture is skipped.
   - with `skipLiveCapture: false` -> live capture is attempted.
+- If a step has more than one saving capture directive, the first uses `<topic>-<step>` and later captures use `<topic>-<step>-captureN`.
 
 ## Examples
 
@@ -91,23 +95,14 @@ These can be declared in object steps, and for array steps some can also be decl
 ]
 ```
 
-### Press Back/Return, then capture the resulting screen
+### Press Back/Return, capture, then continue
 
 ```js
 [
   { type: "remote", key: "KEY_RETURN" },
   { type: "wait", ms: 700 },
-  { type: "capture", mode: "screen" }
-]
-```
-
-### Skip capture in an array step
-
-```js
-[
-  { type: "remote", key: "KEY_HOME" },
-  { type: "wait", ms: 700 },
-  { type: "capture", mode: "skip" }
+  { type: "capture", mode: "screen" },
+  { type: "remote", key: "KEY_DOWN" }
 ]
 ```
 
@@ -129,8 +124,8 @@ These can be declared in object steps, and for array steps some can also be decl
 
 ## Backward Compatibility
 
-- Topic-level `skipCapture` is still supported.
-- Existing steps with only `remote`/`wait` continue to work as before.
+- Existing steps with only `remote`/`wait` still run, but they no longer capture automatically.
+- Step-level retry/reuse options are still read by object steps and used as defaults for capture directives inside `actions`.
 
 ## Available Samsung Remote Buttons
 

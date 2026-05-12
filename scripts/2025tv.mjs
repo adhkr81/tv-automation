@@ -1,92 +1,134 @@
-export const reset = {
-    "0": {
-      steps: [
-        [
-          { type: "remote", key: "KEY_HOME" },
-          { type: "wait", ms: 700 },
-          { type: "remote", key: "KEY_ENTER" },
-          { type: "wait", ms: 700 },
-          { type: "remote", key: "KEY_HOME" },
-          { type: "wait", ms: 700 },
-          { type: "capture", mode: "skip" },
-        ]
-      ],
-    },
-  }
+export const reset = {};
   
   
   //DEFAULT WAIT BETWEEN KEYS IS 800MS, ADD SPECIFIC WAITS FOR EACH STEP IF NEEDED
   export const topics = 
   {
-  "g_54": {
-    "slug": "voice-guide",
-    "steps": [
-      [
-        {
-          "key": "KEY_UP",
-          "type": "remote"
-        },
-        {
-          "key": "KEY_UP",
-          "type": "remote"
-        },
-        {
-          "key": "KEY_DOWN",
-          "type": "remote"
-        },
-        {
-          "ms": 500,
-          "type": "wait"
-        }
-      ],
-      [
-        {
-          "key": "KEY_RIGHT",
-          "type": "remote"
-        },
-        {
-          "key": "KEY_RIGHT",
-          "type": "remote"
-        },
-        {
-          "key": "KEY_DOWN",
-          "type": "remote"
-        }
-      ]
+"g_54": {
+  "topicUrl": "voice-guide",
+  "steps": [
+    [
+      {
+        "type": "remote",
+        "key": "KEY_HOME"
+      },
+      {
+        "type": "capture",
+        "mode": "screen"
+      },
     ],
-    "topic": "Voice Guide"
-  },
-  "g_55": {
-    "slug": "audio-description-settings",
-    "steps": [
-      [
-        {
-          "key": "KEY_DOWN",
-          "type": "remote"
-        },
-        {
-          "key": "KEY_DOWN",
-          "type": "remote"
-        },
-        {
-          "key": "KEY_LEFT",
-          "type": "remote"
-        },
-        {
-          "ms": 500,
-          "type": "wait"
-        }
-      ],
-      [
-        {
-          "mode": "reuse",
-          "reuseImage": "previous",
-          "type": "capture"
-        }
-      ]
+    [
+      {
+        "type": "remote",
+        "key": "KEY_LEFT"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_LEFT"
+      },
+      {
+        "type": "capture",
+        "mode": "screen"
+      }
     ],
-    "topic": "Audio Description Settings"
-  }
+    [
+      {
+        "type": "remote",
+        "key": "KEY_DOWN"
+      },
+      {
+        "type": "capture",
+        "mode": "screen"
+      }
+    ],
+    [
+      {
+        "type": "remote",
+        "key": "KEY_ENTER"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_DOWN"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_DOWN"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_DOWN"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_DOWN"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_DOWN"
+      },
+      {
+        "type": "capture",
+        "mode": "screen"
+      }
+    ],
+    [
+      {
+        "type": "remote",
+        "key": "KEY_ENTER"
+      },
+      {
+        "type": "capture",
+        "mode": "screen"
+      }
+    ],
+    [
+      {
+        "type": "remote",
+        "key": "KEY_ENTER"
+      },
+      {
+        "type": "capture",
+        "mode": "screen"
+      }
+    ],
+    [
+      {
+        "type": "remote",
+        "key": "KEY_ENTER"
+      },
+      {
+        "type": "capture",
+        "mode": "screen"
+      }
+    ],
+    [
+      {
+        "type": "remote",
+        "key": "KEY_ENTER"
+      },
+      {
+        "type": "capture",
+        "mode": "screen"
+      }
+    ],
+    [
+      {
+        "type": "capture",
+        "mode": "reuse",
+        "reuseImage": "previous"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_ENTER"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_HOME"
+      }
+    ]
+  ],
+  "imageGroupPrefix": "54"
+}
 }
 
   

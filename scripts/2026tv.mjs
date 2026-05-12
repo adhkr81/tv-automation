@@ -1,148 +1,668 @@
-export const reset = {
-  "0": {
-    steps: [
-      [
-        { type: "remote", key: "KEY_HOME" },
-        { type: "wait", ms: 700 },
-        { type: "remote", key: "KEY_ENTER" },
-        { type: "wait", ms: 700 },
-        { type: "remote", key: "KEY_HOME" },
-        { type: "wait", ms: 700 },
-        { type: "capture", mode: "skip" },
-      ]
-    ],
-  },
-}
+export const reset = {};
 
 
 //DEFAULT WAIT BETWEEN KEYS IS 800MS, ADD SPECIFIC WAITS FOR EACH STEP IF NEEDED
 export const topics = {
-  "1": {
-    steps: [
-      [
-        { type: "remote", key: "KEY_HOME" },
-      ],
-      [
-        { type: "remote", key: "KEY_LEFT" },
-        { type: "remote", key: "KEY_DOWN" },
-      ],
-      [
-        { type: "remote", key: "KEY_ENTER" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "wait", ms: 500 },
-      ],
-      [
-        { type: "remote", key: "KEY_ENTER" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_UP" },
-        { type: "remote", key: "KEY_UP" },
-      ],
-    ],
+  "g_1": {
+    "slug": "first-time-setup",
+    "topic": "First time setup"
   },
-  "2": {
-    steps: [
+  "g_2": {
+    "steps": [
       [
-        { type: "remote", key: "KEY_HOME" },
+        {
+          "type": "remote",
+          "key": "KEY_HOME"
+        },
+        {
+          "type": "capture",
+          "mode": "screen"
+        }
       ],
       [
-        { type: "remote", key: "KEY_LEFT" },
-        { type: "remote", key: "KEY_DOWN" },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "capture",
+          "mode": "screen"
+        }
       ],
       [
-        { type: "remote", key: "KEY_ENTER" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "wait", ms: 500 }
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "capture",
+          "mode": "screen"
+        }
       ],
       [
-        { type: "remote", key: "KEY_ENTER" },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "capture",
+          "mode": "screen"
+        }
       ],
       [
-        { type: "remote", key: "KEY_ENTER" },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "wait",
+          "ms": 200
+        },
+        {
+          "type": "capture",
+          "mode": "screen"
+        }
       ],
       [
-        { type: "remote", key: "KEY_DOWN" },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_UP"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_RIGHT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_DOWN"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_LEFT"
+        },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "capture",
+          "mode": "screen"
+        }
       ],
       [
-        { type: "remote", key: "KEY_ENTER" },
+        {
+          "type": "remote",
+          "key": "KEY_ENTER"
+        },
+        {
+          "type": "wait",
+          "ms": 200
+        },
+        {
+          "type": "capture",
+          "mode": "screen"
+        }
       ],
       [
-        { type: "remote", key: "KEY_ENTER" },
-        { type: "wait", ms: 10000 },
-      ],
-    ],
-  },
-  "3": {
-    steps: [
-      [
-        { type: "remote", key: "KEY_HOME" },
-      ],
-      [
-        { type: "remote", key: "KEY_LEFT" },
-        { type: "remote", key: "KEY_DOWN" },
-      ],
-      [
-        { type: "remote", key: "KEY_ENTER" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "wait", ms: 500 }
-      ],
-      [
-        { type: "remote", key: "KEY_ENTER" },
-      ],
-      [
-        { type: "remote", key: "KEY_DOWN" },
-      ],
-      [
-        { type: "remote", key: "KEY_ENTER" },
-      ]
-    ],
-  },
-  "4": {
-    steps: [
-      [
-        { type: "remote", key: "KEY_HOME" },
-      ],
-      [
-        { type: "remote", key: "KEY_LEFT" },
-        { type: "remote", key: "KEY_DOWN" },
-      ],
-      [
-        { type: "remote", key: "KEY_ENTER" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "remote", key: "KEY_DOWN" },
-        { type: "wait", ms: 500 }
-      ],
-      [
-        { type: "remote", key: "KEY_ENTER" },
-      ],
-      [
-        { type: "remote", key: "KEY_DOWN" },
-      ],
-      [
-        { type: "remote", key: "KEY_ENTER" },
-      ]
-    ],
-  }
+      {
+        "type": "capture",
+        "mode": "reuse",
+        "reuseImage": "previous"
+      },
+      {
+        "type": "wait",
+        "ms": 1200
+      },
+      {
+        "type": "remote",
+        "key": "KEY_RIGHT"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_ENTER"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_ENTER"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_DOWN"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_ENTER"
+      }
+    ]
+  ],
+},
+
 };
