@@ -83,14 +83,13 @@ Supported action types:
 | `wait` | `ms` | Waits the given number of milliseconds |
 | `capture` | `mode`, `reuseImage` | Saves, skips, or reuses a screenshot at that point in the action list |
 
-Common capture modes:
+Capture `mode` values:
 
 | mode | behavior |
 |---|---|
-| `screen` | Forces a fresh RM graphic capture |
+| `screen` | Fresh RM graphic capture (default if `mode` is omitted) |
 | `reuse` | Copies a previous saved capture, using `reuseImage` such as `"previous"` |
-| `skip` | Explicitly skips capture at that point |
-| `auto` | Uses the default automatic capture/reuse behavior |
+| `skip` | Skips capture at that point |
 
 ## Running
 

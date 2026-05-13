@@ -766,12 +766,12 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
 }
 
 function normalizeCaptureMode(action = {}) {
-  const mode = String(action?.mode || "auto").trim().toLowerCase();
-  if (["screen", "live", "now"].includes(mode)) return "screen";
-  if (["auto", "capture"].includes(mode)) return "auto";
+  const raw = action?.mode;
+  const mode = raw == null || String(raw).trim() === "" ? "screen" : String(raw).trim().toLowerCase();
   if (mode === "reuse") return "reuse";
   if (mode === "skip") return "skip";
-  return "auto";
+  if (mode === "screen") return "screen";
+  return "screen";
 }
 
 function normalizeCaptureAction(action = {}, defaults = {}) {
@@ -925,35 +925,13 @@ function buildReusePlan(topicEntries, startIndex, endExclusive) {
           continue;
         }
 
-        if (mode === "screen") {
-          fingerprintToSourceStepId.set(fingerprint, captureId);
-          planByCaptureId.set(captureId, {
-            decision: "capture",
-            sourceStepId: null,
-            fingerprint,
-            forceLiveCapture: true,
-          });
-          continue;
-        }
-
-        const sourceStepId = fingerprintToSourceStepId.get(fingerprint) || null;
-
-        if (sourceStepId) {
-          reusableSteps += 1;
-          topicReusable += 1;
-          planByCaptureId.set(captureId, {
-            decision: "reuse",
-            sourceStepId,
-            fingerprint,
-          });
-        } else {
-          fingerprintToSourceStepId.set(fingerprint, captureId);
-          planByCaptureId.set(captureId, {
-            decision: "capture",
-            sourceStepId: null,
-            fingerprint,
-          });
-        }
+        fingerprintToSourceStepId.set(fingerprint, captureId);
+        planByCaptureId.set(captureId, {
+          decision: "capture",
+          sourceStepId: null,
+          fingerprint,
+          forceLiveCapture: true,
+        });
       }
     }
     topicStats.push({
@@ -998,7 +976,7 @@ function tryReuseCapture(sourceStepId, targetStepId) {
   return { copied: true, sourcePath, targetPath };
 }
 
-async function runCaptureAction(page, context, remoteController, captureId, action, reusePlan, captureState) {
+async function runCaptureAction(page, context, remoteController, captureId, action, captureState) {
   const mode = normalizeCaptureMode(action);
   if (mode === "skip") {
     logLine(`STEP ${captureId}: capture skipped`);
@@ -1028,22 +1006,6 @@ async function runCaptureAction(page, context, remoteController, captureId, acti
       logLine(`STEP ${captureId}: live capture skipped after manual reuse failure`);
       return;
     }
-  }
-
-  const capturePlan = reusePlan?.planByCaptureId?.get(captureId);
-  if (mode === "auto" && capturePlan?.decision === "reuse" && capturePlan.sourceStepId) {
-    const reuseResult = tryReuseCapture(capturePlan.sourceStepId, captureId);
-    if (reuseResult.copied) {
-      const reuseMsg = `STEP ${captureId}: capture reused from ${capturePlan.sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
-      logLine(reuseMsg);
-      logSummaryLine(reuseMsg);
-      captureState.lastCapturedStepId = captureId;
-      await waitAfterReuse(page, captureId);
-      return;
-    }
-    logCaptureFailure(
-      `STEP ${captureId}: reuse failed (${reuseResult.reason}), falling back to live capture`,
-    );
   }
 
   let captureResult = { saved: false, reason: "not-attempted" };
@@ -1111,7 +1073,6 @@ async function runStepActions(page, context, remoteController, stepId, stepGroup
         remoteController,
         captureId,
         action,
-        options.reusePlan,
         options.captureState || { lastCapturedStepId: null },
       );
     }

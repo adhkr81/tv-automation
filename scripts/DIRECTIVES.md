@@ -35,16 +35,14 @@ You can define each step in one of two ways:
 
 ```js
 { type: "capture" }
-{ type: "capture", mode: "auto" }
 { type: "capture", mode: "screen" }
 { type: "capture", mode: "skip" }
 { type: "capture", mode: "reuse", reuseImage: "previous" }
 { type: "capture", mode: "reuse", reuseImage: "1-3" }
 ```
 
-- Missing `mode` or `mode: "auto"`: capture at this point; automatic reuse may be used when the reuse plan detects an identical screen state.
-- `mode: "screen"`: force a fresh live RM screen capture at this point.
-  - Aliases: `mode: "live"` and `mode: "now"`.
+- Missing `mode`: same as `mode: "screen"` (fresh RM graphic capture at this point).
+- `mode: "screen"`: fresh live RM screen capture at this point.
   - Use it as its own step when you want to capture the current screen between remote actions.
 - `mode: "skip"`: explicitly skip capture at this point. This is mostly useful for generated files; plain remote/wait arrays do not capture by default.
 - `mode: "reuse"`: copy an existing saved image instead of live popup/blob capture.
@@ -77,7 +75,7 @@ These can be declared in object steps, and for array steps some can also be decl
 
 - There is no automatic capture at the end of a step.
 - Capture directives run inline. Actions listed after a capture directive still run after that capture finishes.
-- `mode: "screen"` forces live capture and bypasses automatic capture reuse for that capture point.
+- Only `screen`, `reuse`, and `skip` are supported. Any other `mode` string is treated as `screen`.
 - If `reuseImage` is set, reuse is attempted first.
 - If reuse succeeds, the capture point is completed without blob/popup capture.
 - If reuse fails:
@@ -126,6 +124,7 @@ These can be declared in object steps, and for array steps some can also be decl
 
 - Existing steps with only `remote`/`wait` still run, but they no longer capture automatically.
 - Step-level retry/reuse options are still read by object steps and used as defaults for capture directives inside `actions`.
+- Older topic files that used `mode: "auto"`, `"live"`, `"now"`, or `"capture"` should be updated to `screen`, `reuse`, or `skip`; unknown values are treated as `screen` (there is no fingerprint-based automatic file reuse anymore).
 
 ## Available Samsung Remote Buttons
 
