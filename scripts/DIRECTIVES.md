@@ -24,24 +24,26 @@ export const procedure = {
 };
 ```
 
-### Automatic `procedure.reset`
+### Running packs: inline `procedure` (default) vs automatic `procedure.reset`
 
-If `procedure.reset` exists (including after merging a legacy `reset["0"]` export), the runner executes that pack **before each topic** in the current slice, using synthetic step IDs `procedure-reset-1`, `procedure-reset-2`, … in logs. The pack may include `capture` directives like any other step; those participate in capture/reuse like normal.
+**Default workflow:** put `{ type: "procedure", mode: "<name>" }` in topic steps wherever that pack should run (for example `mode: "reset"` to run `procedure.reset`). Sub-steps are logged as `…-proc-<mode>-1`, ….
 
-Whether reset runs is controlled by `runModes` in `config/automationConfig.js`:
+**Optional automatic `procedure.reset`:** If `procedure.reset` exists (including after merging a legacy `reset["0"]` export), you can have the runner execute that pack **before** topics in the current slice, using synthetic step IDs `procedure-reset-1`, `procedure-reset-2`, … in logs. The pack may include `capture` directives like any other step; those participate in capture/reuse like normal.
 
-- **`runResetBeforeFirstTopic`** (default `true`) — when not `false`, reset runs before the **first** topic in the slice.
-- **`runResetBetweenTopics`** (default `true`) — when not `false`, reset runs before **every subsequent** topic.
+Whether that **automatic** reset runs is controlled by `runModes` in `config/automationConfig.js` (defaults in this repo are **`false`** for both — no pre-topic reset unless you opt in):
 
-Set either flag to `false` to skip reset in that case while keeping the pack defined for inline use or fingerprints.
+- **`runResetBeforeFirstTopic`** — when `true`, the automatic reset runs before the **first** topic in the slice.
+- **`runResetBetweenTopics`** — when `true`, the automatic reset runs before **every subsequent** topic.
 
-### Inline procedure action
+Keep `procedure.reset` defined even when both flags are `false` so inline `{ type: "procedure", mode: "reset" }` and reuse fingerprint expansion still work.
 
-Inside topic steps (or inside **`procedure.reset`** when it runs automatically), you can run any named pack with `{ type: "procedure", mode: "<name>" }` (see [section 4](#4-procedure-directive)). If that pack was **started by** an inline `procedure` action, nested `procedure` actions inside that pack are **skipped** (avoids recursive expansion). Automatic `procedure.reset` does **not** set that flag, so a `procedure` step inside the reset pack **will** run if you define one.
+### Nested `procedure` inside a pack
+
+If a pack was **started by** an inline `{ type: "procedure", ... }` action, nested `procedure` actions inside that pack are **skipped** (avoids recursive expansion). The **automatic** pre-topic `procedure.reset` (when enabled via `runModes`) does **not** set that flag, so a `procedure` step inside the reset pack **will** run if you define one.
 
 ### Reuse fingerprints
 
-When building reuse plans, step fingerprints are prefixed with `reset:0` or `reset:1` depending on whether `procedure.reset` would run before that topic for the planned slice, so identical remote chains with vs without reset do not collide incorrectly.
+When building reuse plans, step fingerprints are prefixed with `reset:0` or `reset:1` depending on whether **automatic** `procedure.reset` would run before that topic for the planned slice (inline `{ type: "procedure", mode: "reset" }` is folded into the action chain separately), so identical remote chains with vs without automatic reset do not collide incorrectly.
 
 ## Step Shapes
 
@@ -100,7 +102,8 @@ You can define each step in one of two ways:
 { type: "procedure", mode: "foo" }
 ```
 
-- Runs the **`procedure[mode]`** pack at this point: same execution as automatic `procedure.reset`, but under a step ID derived from the current topic step (sub-steps are logged as `…-proc-<mode>-1`, …).
+- Runs the **`procedure[mode]`** pack at this point (same pack body as automatic pre-topic reset when that feature is enabled).
+- Sub-steps are logged as `…-proc-<mode>-1`, … (derived from the current topic step).
 - **`mode`** is required; if it is missing, the action is ignored.
 - Pack lookup is case-insensitive on the `procedure` object keys.
 - If no pack matches `mode`, the action is logged and skipped.
@@ -135,7 +138,7 @@ These can be declared in object steps, and for array steps some can also be decl
   - with `skipLiveCapture: true` -> live capture is skipped.
   - with `skipLiveCapture: false` -> live capture is attempted.
 - If a step has more than one saving capture directive, the first uses `<topic>-<step>` and later captures use `<topic>-<step>-captureN`.
-- Reuse-plan fingerprints include whether **`procedure.reset`** runs before that topic (`reset:0` vs `reset:1`); changing reset flags or removing the reset pack can change reuse matching for the same topic steps.
+- Reuse-plan fingerprints include whether **automatic** `procedure.reset` runs before that topic (`reset:0` vs `reset:1`); changing those `runModes` flags or removing the reset pack can change reuse matching for the same topic steps. Inline `{ type: "procedure", mode: "reset" }` is part of the per-step action signature, not that prefix.
 
 ## Examples
 
@@ -174,7 +177,7 @@ These can be declared in object steps, and for array steps some can also be decl
 ]
 ```
 
-### Run a procedure pack in the middle of a topic
+### Run the `reset` procedure pack when you need it
 
 ```js
 [
