@@ -611,7 +611,7 @@ export const topics = {
       },
       {
         "type": "wait",
-        "ms": 1200
+        "ms": 5000
       },
       {
         "type": "capture",
@@ -625,7 +625,7 @@ export const topics = {
       },
       {
         "type": "wait",
-        "ms": 4000
+        "ms": 10000
       },
       {
         "type": "capture",
@@ -801,16 +801,13 @@ export const topics = {
     ],
     [
       {
-        "type": "remote",
-        "key": "KEY_ENTER"
-      },
-      {
-        "type": "wait",
-        "ms": 500
-      },
-      {
         "type": "capture",
-        "mode": "screen"
+        "mode": "reuse",
+        "reuseImage": "2-5"
+      },
+      {
+        "type": "remote",
+        "key": "KEY_HOME"
       }
     ]
   ],

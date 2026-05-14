@@ -27,8 +27,6 @@ let runSummaryLogPath = "";
 let runFailuresLogPath = "";
 let reset = {};
 let topics = {};
-const truthyValues = new Set(["1", "true", "yes", "y", "on"]);
-
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -45,12 +43,6 @@ async function closeBrowserWithTimeout(browser, timeoutMs = 45000) {
     browser.close().catch(() => {}),
     delay(timeoutMs),
   ]);
-}
-
-function isEnabledEnv(name, fallback = false) {
-  const raw = process.env[name];
-  if (raw == null || String(raw).trim() === "") return fallback;
-  return truthyValues.has(String(raw).trim().toLowerCase());
 }
 
 function resolveSessionStorageStatePath() {
@@ -1087,11 +1079,20 @@ async function runCaptureAction(page, context, remoteController, captureId, acti
   }
 
   const planEntry = planByCaptureIdForRun?.get?.(captureId) ?? null;
-  const forceLiveFromPlan = planEntry?.decision === "capture";
+  /** Topic `mode: "reuse"` wins over reuse-plan `decision: "capture"` or plan file-reuse sources. */
+  const topicDeclaresReuse = mode === "reuse";
+  const forceLiveFromPlan = planEntry?.decision === "capture" && !topicDeclaresReuse;
   /** Plan said file reuse but copy did not succeed — still take live capture even if topic `mode: "reuse"` defaults to skipLiveCapture. */
   let planReuseFileMissingTryLive = false;
 
+  if (topicDeclaresReuse && planEntry) {
+    logLine(
+      `STEP ${captureId}: topic mode "reuse" overrides reuse-plan (plan decision: ${planEntry.decision ?? "?"})`,
+    );
+  }
+
   if (
+    !topicDeclaresReuse &&
     planEntry &&
     (planEntry.decision === "manual-reuse" || planEntry.decision === "fingerprint-reuse")
   ) {
@@ -1507,36 +1508,39 @@ async function run() {
     console.log(`Reuse plan saved: ${reusePlanPath}`);
 
     const captureState = { lastCapturedStepId: null };
-    for (let i = startIndex; i < endExclusive; i += 1) {
-      const [topicId, topicData] = topicEntries[i];
-      const resetTopic = reset?.["0"];
-      if (resetTopic && shouldRunResetForTopic(i, startIndex)) {
-        logLine(`RESET before topic ${topicId}: started`);
-        const resetStepGroups = toStepGroups(resetTopic);
-        for (let resetStepIndex = 0; resetStepIndex < resetStepGroups.length; resetStepIndex += 1) {
-          const resetStepId = `reset-0-${resetStepIndex + 1}`;
-          await runStepActions(page, context, remoteController, resetStepId, resetStepGroups[resetStepIndex], {
-            captureState,
-            planByCaptureIdForRun: planByCaptureId,
+
+    async function runTopicSlice(sliceStart, sliceEndExclusive, slicePlan, captureStateForSlice) {
+      for (let i = sliceStart; i < sliceEndExclusive; i += 1) {
+        const [topicId, topicData] = topicEntries[i];
+        const resetTopic = reset?.["0"];
+        if (resetTopic && shouldRunResetForTopic(i, sliceStart)) {
+          logLine(`RESET before topic ${topicId}: started`);
+          const resetStepGroups = toStepGroups(resetTopic);
+          for (let resetStepIndex = 0; resetStepIndex < resetStepGroups.length; resetStepIndex += 1) {
+            const resetStepId = `reset-0-${resetStepIndex + 1}`;
+            await runStepActions(page, context, remoteController, resetStepId, resetStepGroups[resetStepIndex], {
+              captureState: captureStateForSlice,
+              planByCaptureIdForRun: slicePlan,
+            });
+          }
+          logLine(`RESET before topic ${topicId}: finished`);
+        }
+        console.log(`Running topic: ${formatTopicLabel(topicId, topicData)}`);
+        logTopicStarted(topicId, topicData);
+        const stepGroups = toStepGroups(topicData);
+        for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
+          const stepGroup = stepGroups[stepIndex];
+          const stepId = `${topicId}-${stepIndex + 1}`;
+          await runStepActions(page, context, remoteController, stepId, stepGroup, {
+            captureState: captureStateForSlice,
+            planByCaptureIdForRun: slicePlan,
           });
         }
-        logLine(`RESET before topic ${topicId}: finished`);
+        logLine(`TOPIC ${topicId}: finished`);
       }
-      console.log(`Running topic: ${formatTopicLabel(topicId, topicData)}`);
-      logTopicStarted(topicId, topicData);
-      const stepGroups = toStepGroups(topicData);
-      for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
-        const stepGroup = stepGroups[stepIndex];
-        const stepId = `${topicId}-${stepIndex + 1}`;
-        await runStepActions(page, context, remoteController, stepId, stepGroup, {
-          captureState,
-          planByCaptureIdForRun: planByCaptureId,
-        });
-      }
-      logLine(`TOPIC ${topicId}: finished`);
-
-      // Continue automatically to the next topic unless a single topic was selected at prompt.
     }
+
+    await runTopicSlice(startIndex, endExclusive, planByCaptureId, captureState);
 
     console.log(`Capture run complete: ${runDir}`);
     if (runSingleTopic) {
@@ -1549,11 +1553,41 @@ async function run() {
     if (runSummaryLogPath) console.log(`Summary run log: ${runSummaryLogPath}`);
     if (runFailuresLogPath) console.log(`Missed-captures run log: ${runFailuresLogPath}`);
     console.log(`Run logs folder: ${runLogDir}`);
-    const keepBrowserOpenEnvName = capture.keepBrowserOpenEnv || "KEEP_BROWSER_OPEN";
-    if (isEnabledEnv(keepBrowserOpenEnvName, false)) {
-      await rl.question(
-        `${keepBrowserOpenEnvName}: browser left open. Press Enter in this terminal to close Chromium and exit… `,
-      );
+
+    const exitTokens = new Set(["exit", "q", "quit", "bye"]);
+    for (;;) {
+      const followUp = (
+        await rl.question(
+          `Another topic? Type a topic id (${availableTopicIds}), or exit / q to close the browser and quit: `,
+        )
+      )
+        .trim()
+        .toLowerCase();
+      if (exitTokens.has(followUp)) {
+        logLine("FLOW exit requested by user (browser will close)");
+        break;
+      }
+      if (!followUp) {
+        console.log("Type a topic id to run again, or exit / q to quit.");
+        continue;
+      }
+      const matchedFollowUp = findTopicEntry(topicEntries, followUp);
+      if (!matchedFollowUp) {
+        console.log(`Topic "${followUp}" not found. Available: ${availableTopicIds}`);
+        continue;
+      }
+      const [followTopicId] = matchedFollowUp;
+      const followIndex = topicEntries.findIndex(([id]) => id === followTopicId);
+      logLine(`INTERACTIVE follow-up: running topic ${followTopicId}`);
+      const sliceReuse = buildReusePlan(topicEntries, followIndex, followIndex + 1);
+      let slicePlan = sliceReuse.planByCaptureId;
+      if (reusePlanOverlayPath) {
+        const overlayDecisionsFollow = loadReusePlanDecisionsFromFile(reusePlanOverlayPath);
+        slicePlan = mergeReusePlanDecisions(slicePlan, overlayDecisionsFollow);
+      }
+      const followCaptureState = { lastCapturedStepId: null };
+      await runTopicSlice(followIndex, followIndex + 1, slicePlan, followCaptureState);
+      console.log(`Topic finished: ${followTopicId}`);
     }
   } finally {
     process.removeAllListeners("SIGINT");
