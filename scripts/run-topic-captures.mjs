@@ -15,6 +15,8 @@ const { timeouts = {}, capture = {}, runModes = {}, topicPolicy = {}, healthChec
   automationConfig;
 
 const capturesRootDir = path.join(process.cwd(), capture.outputDir || "captures");
+/** Canonical reuse plan next to PNGs for a topic pack (e.g. captures/2026tv/reuse-plan.json). */
+const REUSE_PLAN_FILENAME = "reuse-plan.json";
 let runDir = capturesRootDir;
 const logsDir = path.join(process.cwd(), "logs");
 /** Minute-level stamp for run folder/log naming (no seconds or milliseconds). */
@@ -23,12 +25,26 @@ const runLogDir = path.join(logsDir, `run-${runStamp}`);
 let runLogPath = "";
 let runSummaryLogPath = "";
 let runFailuresLogPath = "";
-let reset = {};
+let procedure = {};
 let topics = {};
-const truthyValues = new Set(["1", "true", "yes", "y", "on"]);
+
+function getProcedurePack(mode) {
+  const raw = String(mode ?? "").trim();
+  if (!raw || procedure == null || typeof procedure !== "object") return null;
+  if (procedure[raw] != null) return procedure[raw];
+  const lowered = raw.toLowerCase();
+  if (procedure[lowered] != null) return procedure[lowered];
+  return null;
+}
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** File basename for captures: drop leading `g_` when present (e.g. `g_2-1` → `2-1`). */
+function captureFileStem(id) {
+  const s = String(id || "");
+  return s.startsWith("g_") ? s.slice(2) : s;
 }
 
 /** @returns {Promise<void>} */
@@ -37,12 +53,6 @@ async function closeBrowserWithTimeout(browser, timeoutMs = 45000) {
     browser.close().catch(() => {}),
     delay(timeoutMs),
   ]);
-}
-
-function isEnabledEnv(name, fallback = false) {
-  const raw = process.env[name];
-  if (raw == null || String(raw).trim() === "") return fallback;
-  return truthyValues.has(String(raw).trim().toLowerCase());
 }
 
 function resolveSessionStorageStatePath() {
@@ -55,6 +65,71 @@ function resolveTopicsFileName() {
   const rawValue = (cliArg?.slice("--topics=".length) || process.env.TOPICS_FILE || "2026tv").trim();
   if (!rawValue) return "2026tv.mjs";
   return rawValue.endsWith(".mjs") ? rawValue : `${rawValue}.mjs`;
+}
+
+/** Optional JSON overlay: same shape as a saved `reuse-plan.json` (`decisions` object). */
+function resolveReusePlanOverlayPath() {
+  const cliArg = process.argv.find((arg) => arg.startsWith("--reuse-plan="));
+  const fromCli = cliArg?.slice("--reuse-plan=".length)?.trim() ?? "";
+  const fromEnv = (process.env.REUSE_PLAN_PATH || "").trim();
+  const raw = fromCli || fromEnv;
+  if (!raw) return null;
+  return path.isAbsolute(raw) ? raw : path.join(process.cwd(), raw);
+}
+
+function loadReusePlanDecisionsFromFile(filePath) {
+  const raw = fs.readFileSync(filePath, "utf8");
+  const data = JSON.parse(raw);
+  if (!data || typeof data.decisions !== "object" || data.decisions === null) {
+    throw new Error(`Reuse plan file "${filePath}" must contain a "decisions" object.`);
+  }
+  return data.decisions;
+}
+
+function mergeReusePlanDecisions(basePlanMap, overlayDecisions) {
+  const merged = new Map(basePlanMap);
+  for (const [k, v] of Object.entries(overlayDecisions)) {
+    merged.set(k, v);
+  }
+  return merged;
+}
+
+function countPlanReuseEntries(planByCaptureId) {
+  let n = 0;
+  for (const v of planByCaptureId.values()) {
+    if (v?.decision === "manual-reuse" || v?.decision === "fingerprint-reuse") n += 1;
+  }
+  return n;
+}
+
+function topicStatsForPlan(topicEntries, startIndex, endExclusive, planByCaptureId) {
+  const out = [];
+  for (let i = startIndex; i < endExclusive; i += 1) {
+    const [topicId, topicData] = topicEntries[i];
+    const stepGroups = toStepGroups(topicData);
+    let captureEligible = 0;
+    let reusable = 0;
+    for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
+      const stepId = `${topicId}-${stepIndex + 1}`;
+      let savingCaptureOrdinal = 0;
+      for (const act of stepGroups[stepIndex].actions) {
+        if (act?.type !== "capture") continue;
+        if (normalizeCaptureMode(act) === "skip") continue;
+        savingCaptureOrdinal += 1;
+        const captureId = getCaptureId(stepId, savingCaptureOrdinal);
+        captureEligible += 1;
+        const ent = planByCaptureId.get(captureId);
+        if (ent?.decision === "manual-reuse" || ent?.decision === "fingerprint-reuse") reusable += 1;
+      }
+    }
+    out.push({
+      topicId,
+      totalSteps: stepGroups.length,
+      captureEligibleSteps: captureEligible,
+      reusableSteps: reusable,
+    });
+  }
+  return out;
 }
 
 function resolveRunDirForTopicsFile(topicsFileName) {
@@ -80,15 +155,37 @@ async function loadTopicInstructions() {
 
   const topicsModule = await import(`./${topicsFileName}`);
   const loadedTopics = topicsModule.topics;
-  const loadedReset = topicsModule.reset;
+  const hasProcedureExport = topicsModule.procedure != null && typeof topicsModule.procedure === "object";
+  const hasLegacyResetExport = topicsModule.reset != null && typeof topicsModule.reset === "object";
   if (!loadedTopics || typeof loadedTopics !== "object") {
     throw new Error(`Topics file "${topicsFileName}" must export a "topics" object.`);
   }
-  if (!loadedReset || typeof loadedReset !== "object") {
-    throw new Error(`Topics file "${topicsFileName}" must export a "reset" object.`);
+  if (!hasProcedureExport && !hasLegacyResetExport) {
+    throw new Error(
+      `Topics file "${topicsFileName}" must export a "procedure" object (or legacy "reset" object).`,
+    );
   }
 
-  return { topicsFileName, loadedTopics, loadedReset };
+  const loadedProcedure = normalizeProcedureExport(topicsModule);
+
+  return { topicsFileName, loadedTopics, loadedProcedure };
+}
+
+/** Merge `export const procedure` with legacy `reset["0"]` → `procedure.reset` when absent. */
+function normalizeProcedureExport(topicsModule) {
+  const proc = topicsModule.procedure;
+  const legacy = topicsModule.reset;
+  if (proc != null && typeof proc === "object") {
+    const merged = { ...proc };
+    if (merged.reset == null && legacy?.["0"] != null && typeof legacy["0"] === "object") {
+      merged.reset = legacy["0"];
+    }
+    return merged;
+  }
+  if (legacy != null && typeof legacy === "object" && legacy["0"] != null && typeof legacy["0"] === "object") {
+    return { reset: legacy["0"] };
+  }
+  return {};
 }
 
 function applyLogTemplate(template, topicId) {
@@ -452,7 +549,7 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
           featureFlags.enableHeartbeatRedKey === false
             ? null
             : async () => {
-                await remoteController.pressKey(capture.heartbeatKey || "KEY_RED");
+                await pressRemoteKey(remoteController, capture.heartbeatKey || "KEY_RED");
                 logLine(`STEP ${topicId}: heartbeat "${capture.heartbeatKey || "KEY_RED"}" sent while RM inactive`);
               },
         inactiveIntervalMs: capture.heartbeatIntervalMs ?? 10000,
@@ -701,7 +798,7 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
 
     if (captureData?.base64) {
       const extension = captureData.mime.includes("jpeg") ? "jpg" : "png";
-      const targetPath = path.join(runDir, `${topicId}.${extension}`);
+      const targetPath = path.join(runDir, `${captureFileStem(topicId)}.${extension}`);
       fs.writeFileSync(targetPath, Buffer.from(captureData.base64, "base64"));
       console.log(`RM OSD capture saved from popup: ${targetPath}`);
       saved = true;
@@ -716,7 +813,7 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
         await page.waitForTimeout(200);
       }
     } else if (previewScreenshotBuf && previewScreenshotBuf.length > 50) {
-      const targetPath = path.join(runDir, `${topicId}.png`);
+      const targetPath = path.join(runDir, `${captureFileStem(topicId)}.png`);
       fs.writeFileSync(targetPath, previewScreenshotBuf);
       console.log(`RM OSD capture saved from preview screenshot: ${targetPath}`);
       saved = true;
@@ -750,7 +847,7 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
 
   const download = await downloadPromise;
   if (download) {
-    const filename = `${topicId}-${download.suggestedFilename()}`;
+    const filename = `${captureFileStem(topicId)}-${download.suggestedFilename()}`;
     const targetPath = path.join(runDir, filename);
     await download.saveAs(targetPath);
     console.log(`RM capture downloaded: ${targetPath}`);
@@ -765,84 +862,79 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
   return { saved, reason };
 }
 
+function normalizeCaptureMode(action = {}) {
+  const raw = action?.mode;
+  const mode = raw == null || String(raw).trim() === "" ? "screen" : String(raw).trim().toLowerCase();
+  if (mode === "reuse") return "reuse";
+  if (mode === "skip") return "skip";
+  if (mode === "screen") return "screen";
+  return "screen";
+}
+
+function normalizeCaptureAction(action = {}, defaults = {}) {
+  const hasMode = action?.mode != null && String(action.mode).trim() !== "";
+  const mode =
+    defaults.forceLiveCapture && !hasMode
+      ? "screen"
+      : normalizeCaptureMode(action);
+  return {
+    ...action,
+    type: "capture",
+    mode,
+    reuseImage: action?.reuseImage ?? action?.sourceStepId ?? defaults.reuseImage ?? null,
+    skipLiveCapture:
+      typeof action?.skipLiveCapture === "boolean"
+        ? action.skipLiveCapture
+        : (typeof defaults.skipLiveCapture === "boolean" ? defaults.skipLiveCapture : mode === "reuse"),
+    captureRetries:
+      typeof action?.captureRetries === "number"
+        ? action.captureRetries
+        : defaults.captureRetries,
+    retryWaitMs:
+      typeof action?.retryWaitMs === "number"
+        ? action.retryWaitMs
+        : defaults.retryWaitMs,
+  };
+}
+
+function normalizeStepActions(actions = [], defaults = {}) {
+  return actions
+    .filter(Boolean)
+    .map((action) => (action?.type === "capture" ? normalizeCaptureAction(action, defaults) : action));
+}
+
 function toStepGroups(topicData) {
-  const topicSkipCapture = Boolean(topicData?.skipCapture);
-  const normalizeActionsAndCaptureOverrides = (actions = []) => {
-    const executableActions = [];
-    const overrides = {
-      skipCapture: null,
-      reuseImage: null,
-      skipLiveCapture: null,
-      captureRetries: null,
-      retryWaitMs: null,
-      forceLiveCapture: null,
-    };
-
-    for (const action of actions) {
-      if (action?.type !== "capture") {
-        executableActions.push(action);
-        continue;
-      }
-
-      const mode = String(action?.mode || "").toLowerCase();
-      if (mode === "skip") {
-        overrides.skipCapture = true;
-        overrides.reuseImage = null;
-        overrides.forceLiveCapture = false;
-      } else if (mode === "reuse") {
-        overrides.reuseImage = action?.reuseImage || action?.sourceStepId || "previous";
-        overrides.skipLiveCapture = action?.skipLiveCapture ?? true;
-        overrides.forceLiveCapture = false;
-      } else if (["screen", "live", "now"].includes(mode)) {
-        overrides.skipCapture = false;
-        overrides.reuseImage = null;
-        overrides.skipLiveCapture = false;
-        overrides.forceLiveCapture = true;
-      }
-
-      if (typeof action?.captureRetries === "number") overrides.captureRetries = action.captureRetries;
-      if (typeof action?.retryWaitMs === "number") overrides.retryWaitMs = action.retryWaitMs;
-    }
-
-    return { executableActions, overrides };
+  const baseDefaults = {
+    captureRetries: capture.retryAttempts ?? 4,
+    retryWaitMs: capture.retryWaitMs ?? 800,
+    reuseImage: null,
+    skipLiveCapture: null,
+    forceLiveCapture: false,
   };
 
   return (topicData?.steps || []).map((s) => {
     if (Array.isArray(s)) {
-      const { executableActions, overrides } = normalizeActionsAndCaptureOverrides(s);
       return {
-        actions: executableActions,
-        captureRetries: overrides.captureRetries ?? (capture.retryAttempts ?? 4),
-        retryWaitMs: overrides.retryWaitMs ?? (capture.retryWaitMs ?? 800),
-        skipCapture: typeof overrides.skipCapture === "boolean" ? overrides.skipCapture : topicSkipCapture,
-        reuseImage: overrides.reuseImage,
-        skipLiveCapture: typeof overrides.skipLiveCapture === "boolean" ? overrides.skipLiveCapture : false,
-        forceLiveCapture: typeof overrides.forceLiveCapture === "boolean" ? overrides.forceLiveCapture : false,
+        actions: normalizeStepActions(s, baseDefaults),
       };
     }
+
     const objectActions = Array.isArray(s.actions) ? s.actions : [];
-    const { executableActions, overrides } = normalizeActionsAndCaptureOverrides(objectActions);
-    return {
-      actions: executableActions,
+    const stepDefaults = {
       captureRetries:
         typeof s.captureRetries === "number"
           ? s.captureRetries
-          : (overrides.captureRetries ?? (capture.retryAttempts ?? 4)),
+          : baseDefaults.captureRetries,
       retryWaitMs:
-        typeof s.retryWaitMs === "number" ? s.retryWaitMs : (overrides.retryWaitMs ?? (capture.retryWaitMs ?? 800)),
-      skipCapture:
-        typeof s.skipCapture === "boolean"
-          ? s.skipCapture
-          : (typeof overrides.skipCapture === "boolean" ? overrides.skipCapture : topicSkipCapture),
-      reuseImage: s.reuseImage ?? overrides.reuseImage,
+        typeof s.retryWaitMs === "number" ? s.retryWaitMs : baseDefaults.retryWaitMs,
+      reuseImage: s.reuseImage ?? null,
       skipLiveCapture:
-        typeof s.skipLiveCapture === "boolean"
-          ? s.skipLiveCapture
-          : (typeof overrides.skipLiveCapture === "boolean" ? overrides.skipLiveCapture : false),
+        typeof s.skipLiveCapture === "boolean" ? s.skipLiveCapture : null,
       forceLiveCapture:
-        typeof s.forceLiveCapture === "boolean"
-          ? s.forceLiveCapture
-          : (typeof overrides.forceLiveCapture === "boolean" ? overrides.forceLiveCapture : false),
+        typeof s.forceLiveCapture === "boolean" ? s.forceLiveCapture : false,
+    };
+    return {
+      actions: normalizeStepActions(objectActions, stepDefaults),
     };
   });
 }
@@ -851,6 +943,7 @@ function actionToSignature(action) {
   const type = String(action?.type || "unknown");
   if (type === "remote") return `remote:${String(action?.key || "")}`;
   if (type === "wait") return `wait:${Number(action?.ms || 0)}`;
+  if (type === "procedure") return `procedure:${String(action?.mode || "").trim().toLowerCase()}`;
   return `${type}:${JSON.stringify(action ?? {})}`;
 }
 
@@ -858,11 +951,40 @@ function getDefaultStepWaitMs() {
   return Math.max(0, Number(timeouts.defaultStepWaitMs ?? 800));
 }
 
-function getNormalizedStepActionSignatures(actions) {
-  const signatures = [];
+/**
+ * Inline `{ type: "procedure", mode: "<name>" }` expands to the remote/wait chain of `procedure[<name>]`
+ * (for reuse fingerprints). Nested `{ type: "procedure" }` inside that pack is not expanded again.
+ */
+function appendProcedurePackSignatures(signatures, procedureMode, expandNestedProcedure) {
+  const modeKey = String(procedureMode ?? "").trim();
+  const pack = getProcedurePack(modeKey);
+  if (!pack) {
+    signatures.push(`procedure:${modeKey.toLowerCase() || "unknown"}:missing-pack`);
+    return;
+  }
+  const packStepGroups = toStepGroups(pack);
+  for (const stepGroup of packStepGroups) {
+    for (let ai = 0; ai < stepGroup.actions.length; ai += 1) {
+      appendNormalizedActionSignatures(signatures, stepGroup.actions, ai, {
+        expandProcedure: expandNestedProcedure,
+      });
+    }
+  }
+}
+
+function appendNormalizedActionSignatures(signatures, actions, index, options = {}) {
+  const expandProcedure = options.expandProcedure !== false;
   const defaultStepWaitMs = getDefaultStepWaitMs();
-  for (let index = 0; index < actions.length; index += 1) {
-    const action = actions[index];
+  const action = actions[index];
+  if (expandProcedure && action?.type === "procedure") {
+    const mode = String(action?.mode || "").trim();
+    if (mode) {
+      signatures.push(actionToSignature(action));
+      appendProcedurePackSignatures(signatures, mode, false);
+      return;
+    }
+  }
+  if (action?.type === "remote" || action?.type === "wait") {
     signatures.push(actionToSignature(action));
     if (action?.type === "remote") {
       const nextAction = actions[index + 1];
@@ -872,7 +994,10 @@ function getNormalizedStepActionSignatures(actions) {
       }
     }
   }
-  return signatures;
+}
+
+function getCaptureId(stepId, captureOrdinal) {
+  return captureOrdinal <= 1 ? stepId : `${stepId}-capture${captureOrdinal}`;
 }
 
 function buildStepFingerprint(resetApplied, actionSignatures) {
@@ -881,7 +1006,7 @@ function buildStepFingerprint(resetApplied, actionSignatures) {
 
 function buildReusePlan(topicEntries, startIndex, endExclusive) {
   const fingerprintToSourceStepId = new Map();
-  const planByStepId = new Map();
+  const planByCaptureId = new Map();
   const topicStats = [];
   let totalSteps = 0;
   let captureEligibleSteps = 0;
@@ -890,57 +1015,74 @@ function buildReusePlan(topicEntries, startIndex, endExclusive) {
   for (let i = startIndex; i < endExclusive; i += 1) {
     const [topicId, topicData] = topicEntries[i];
     const stepGroups = toStepGroups(topicData);
-    const resetApplied = Boolean(reset?.["0"] && shouldRunResetForTopic(i, startIndex));
+    const resetApplied = Boolean(getProcedurePack("reset") && shouldRunResetForTopic(i, startIndex));
+    /**
+     * Remote/wait signatures from topic start: for each entry in `steps`, only actions from index 0
+     * of that step's array, in order, through the current step up to each capture (then capture-slot markers).
+     * Slot markers use a per-topic 1-based index so two topics with identical remote chains get identical fingerprints.
+     * Matches require the same whole chain since steps[0], not an isolated identical step later.
+     */
     const prefixActionSignatures = [];
+    /** 1-based index of saving captures in this topic only (for fingerprint anchors — avoids g_2-1 vs g_3-1 skewing later keys). */
+    let topicFingerprintCaptureSeq = 0;
     let topicReusable = 0;
     let topicCaptureEligible = 0;
     for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
       const stepGroup = stepGroups[stepIndex];
       const stepId = `${topicId}-${stepIndex + 1}`;
       totalSteps += 1;
-      const normalizedActionSignatures = getNormalizedStepActionSignatures(stepGroup.actions);
-      prefixActionSignatures.push(...normalizedActionSignatures);
-      if (stepGroup.skipCapture) {
-        planByStepId.set(stepId, {
-          decision: "skip-capture",
-          sourceStepId: null,
-          fingerprint: null,
-        });
-        continue;
-      }
+      let savingCaptureOrdinal = 0;
 
-      captureEligibleSteps += 1;
-      topicCaptureEligible += 1;
-      const fingerprint = buildStepFingerprint(resetApplied, prefixActionSignatures);
+      for (let actionIndex = 0; actionIndex < stepGroup.actions.length; actionIndex += 1) {
+        const action = stepGroup.actions[actionIndex];
+        if (action?.type !== "capture") {
+          appendNormalizedActionSignatures(prefixActionSignatures, stepGroup.actions, actionIndex, {});
+          continue;
+        }
 
-      if (stepGroup.forceLiveCapture) {
-        fingerprintToSourceStepId.set(fingerprint, stepId);
-        planByStepId.set(stepId, {
-          decision: "capture",
-          sourceStepId: null,
-          fingerprint,
-          forceLiveCapture: true,
-        });
-        continue;
-      }
+        const mode = normalizeCaptureMode(action);
+        if (mode === "skip") continue;
 
-      const sourceStepId = fingerprintToSourceStepId.get(fingerprint) || null;
+        savingCaptureOrdinal += 1;
+        const captureId = getCaptureId(stepId, savingCaptureOrdinal);
+        captureEligibleSteps += 1;
+        topicCaptureEligible += 1;
+        const fingerprint = buildStepFingerprint(resetApplied, prefixActionSignatures);
 
-      if (sourceStepId) {
-        reusableSteps += 1;
-        topicReusable += 1;
-        planByStepId.set(stepId, {
-          decision: "reuse",
-          sourceStepId,
-          fingerprint,
-        });
-      } else {
-        fingerprintToSourceStepId.set(fingerprint, stepId);
-        planByStepId.set(stepId, {
-          decision: "capture",
-          sourceStepId: null,
-          fingerprint,
-        });
+        if (mode === "reuse") {
+          reusableSteps += 1;
+          topicReusable += 1;
+          planByCaptureId.set(captureId, {
+            decision: "manual-reuse",
+            sourceStepId: action.reuseImage || "previous",
+            fingerprint,
+          });
+          fingerprintToSourceStepId.set(fingerprint, captureId);
+          topicFingerprintCaptureSeq += 1;
+          prefixActionSignatures.push(`__capture_anchor:${topicFingerprintCaptureSeq}__`);
+          continue;
+        }
+
+        if (fingerprintToSourceStepId.has(fingerprint)) {
+          const sourceId = fingerprintToSourceStepId.get(fingerprint);
+          reusableSteps += 1;
+          topicReusable += 1;
+          planByCaptureId.set(captureId, {
+            decision: "fingerprint-reuse",
+            sourceStepId: sourceId,
+            fingerprint,
+          });
+        } else {
+          planByCaptureId.set(captureId, {
+            decision: "capture",
+            sourceStepId: null,
+            fingerprint,
+            forceLiveCapture: true,
+          });
+          fingerprintToSourceStepId.set(fingerprint, captureId);
+        }
+        topicFingerprintCaptureSeq += 1;
+        prefixActionSignatures.push(`__capture_anchor:${topicFingerprintCaptureSeq}__`);
       }
     }
     topicStats.push({
@@ -961,15 +1103,22 @@ function buildReusePlan(topicEntries, startIndex, endExclusive) {
       newCaptureSteps: captureEligibleSteps - reusableSteps,
     },
     topicStats,
-    planByStepId,
+    planByCaptureId,
   };
 }
 
 function getStepCapturePath(stepId) {
   const extensions = [".png", ".jpg", ".jpeg"];
-  for (const extension of extensions) {
-    const candidate = path.join(runDir, `${stepId}${extension}`);
-    if (fs.existsSync(candidate)) return candidate;
+  const raw = String(stepId || "");
+  const stems = [];
+  const stem = captureFileStem(stepId);
+  stems.push(stem);
+  if (raw !== stem) stems.push(raw);
+  for (const base of stems) {
+    for (const extension of extensions) {
+      const candidate = path.join(runDir, `${base}${extension}`);
+      if (fs.existsSync(candidate)) return candidate;
+    }
   }
   return null;
 }
@@ -980,14 +1129,132 @@ function tryReuseCapture(sourceStepId, targetStepId) {
     return { copied: false, reason: `source-not-found:${sourceStepId}` };
   }
   const extension = path.extname(sourcePath) || ".png";
-  const targetPath = path.join(runDir, `${targetStepId}${extension}`);
+  const targetPath = path.join(runDir, `${captureFileStem(targetStepId)}${extension}`);
   fs.copyFileSync(sourcePath, targetPath);
   return { copied: true, sourcePath, targetPath };
 }
 
-async function runStepActions(page, remoteController, stepId, stepGroup) {
+async function runCaptureAction(page, context, remoteController, captureId, action, captureState, planByCaptureIdForRun = null) {
+  const mode = normalizeCaptureMode(action);
+  if (mode === "skip") {
+    logLine(`STEP ${captureId}: capture skipped`);
+    return;
+  }
+
+  const planEntry = planByCaptureIdForRun?.get?.(captureId) ?? null;
+  /** Topic `mode: "reuse"` wins over reuse-plan `decision: "capture"` or plan file-reuse sources. */
+  const topicDeclaresReuse = mode === "reuse";
+  const forceLiveFromPlan = planEntry?.decision === "capture" && !topicDeclaresReuse;
+  /** Plan said file reuse but copy did not succeed — still take live capture even if topic `mode: "reuse"` defaults to skipLiveCapture. */
+  let planReuseFileMissingTryLive = false;
+
+  if (topicDeclaresReuse && planEntry) {
+    logLine(
+      `STEP ${captureId}: topic mode "reuse" overrides reuse-plan (plan decision: ${planEntry.decision ?? "?"})`,
+    );
+  }
+
+  if (
+    !topicDeclaresReuse &&
+    planEntry &&
+    (planEntry.decision === "manual-reuse" || planEntry.decision === "fingerprint-reuse")
+  ) {
+    const requestedSource = String(planEntry.sourceStepId ?? "previous").trim();
+    const sourceStepId =
+      requestedSource.toLowerCase() === "previous" ? captureState.lastCapturedStepId : requestedSource;
+    if (sourceStepId) {
+      const reuseResult = tryReuseCapture(sourceStepId, captureId);
+      if (reuseResult.copied) {
+        const tag =
+          planEntry.decision === "fingerprint-reuse" ? "fingerprint-reuse (plan)" : "manual-reuse (plan)";
+        const reuseMsg = `STEP ${captureId}: capture reused from ${sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)}) [${tag}]`;
+        logLine(reuseMsg);
+        logSummaryLine(reuseMsg);
+        console.log(`RM OSD capture reused [${tag}]: ${reuseResult.targetPath} (from ${reuseResult.sourcePath})`);
+        captureState.lastCapturedStepId = captureId;
+        await waitAfterReuse(page, captureId);
+        return;
+      }
+      planReuseFileMissingTryLive = true;
+      logCaptureFailure(
+        `STEP ${captureId}: plan reuse failed (${reuseResult.reason}); attempting live capture`,
+        false,
+      );
+      logLine(`STEP ${captureId}: reuse-plan source file not found for ${sourceStepId} — falling back to RM popup capture`);
+      console.log(`STEP ${captureId}: reuse-plan file missing (${reuseResult.reason}) — live RM capture`);
+    } else {
+      planReuseFileMissingTryLive = true;
+      logCaptureFailure(`STEP ${captureId}: plan reuse failed (no-previous-capture); attempting live capture`, false);
+      logLine(`STEP ${captureId}: reuse-plan had no usable source — falling back to RM popup capture`);
+      console.log(`STEP ${captureId}: reuse-plan had no previous capture — live RM capture`);
+    }
+  }
+
+  if (mode === "reuse" && !forceLiveFromPlan) {
+    const requestedSource = String(action.reuseImage || action.sourceStepId || "previous").trim();
+    const sourceStepId =
+      requestedSource.toLowerCase() === "previous" ? captureState.lastCapturedStepId : requestedSource;
+    if (sourceStepId) {
+      const reuseResult = tryReuseCapture(sourceStepId, captureId);
+      if (reuseResult.copied) {
+        const reuseMsg = `STEP ${captureId}: capture reused from ${sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
+        logLine(reuseMsg);
+        logSummaryLine(reuseMsg);
+        console.log(`RM OSD capture reused [topic action]: ${reuseResult.targetPath} (from ${reuseResult.sourcePath})`);
+        captureState.lastCapturedStepId = captureId;
+        await waitAfterReuse(page, captureId);
+        return;
+      }
+      logCaptureFailure(`STEP ${captureId}: manual reuse failed (${reuseResult.reason})`);
+    } else {
+      logCaptureFailure(`STEP ${captureId}: manual reuse failed (no-previous-capture)`);
+    }
+
+    if (action.skipLiveCapture !== false && !planReuseFileMissingTryLive) {
+      logLine(`STEP ${captureId}: live capture skipped after manual reuse failure`);
+      return;
+    }
+  }
+
+  let captureResult = { saved: false, reason: "not-attempted" };
+  const maxAttempts = Math.max(1, action.captureRetries ?? (capture.retryAttempts ?? 4));
+  const retryWaitMs = Math.max(0, action.retryWaitMs ?? (capture.retryWaitMs ?? 800));
+  let preferExistingPopupRetry = false;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    logLine(
+      `STEP ${captureId}: capture attempt ${attempt}/${maxAttempts} started`,
+    );
+    captureResult = await triggerRmCapture(page, context, remoteController, captureId, {
+      reuseExistingPopup: preferExistingPopupRetry,
+    }).catch((error) => ({
+      saved: false,
+      reason: error?.message || "capture-attempt-error",
+    }));
+    if (captureResult.saved) {
+      logLine(`STEP ${captureId}: capture saved on attempt ${attempt}`);
+      logSummaryLine(`STEP ${captureId}: capture saved`);
+      captureState.lastCapturedStepId = captureId;
+      break;
+    }
+    preferExistingPopupRetry = captureResult.reason === "popup-image-extraction-failed";
+    logCaptureFailure(
+      `STEP ${captureId}: capture failed attempt ${attempt} (${captureResult.reason})`,
+      false,
+    );
+    if (attempt < maxAttempts) {
+      await page.waitForTimeout(retryWaitMs);
+    }
+  }
+  if (!captureResult.saved) {
+    logCaptureFailure(`STEP ${captureId}: capture NOT saved (${captureResult.reason})`);
+    await closeCapturePopups(context, page);
+  }
+}
+
+async function runStepActions(page, context, remoteController, stepId, stepGroup, options = {}) {
   logLine(`STEP ${stepId}: started`);
   const defaultStepWaitMs = getDefaultStepWaitMs();
+  let savingCaptureOrdinal = 0;
   for (let index = 0; index < stepGroup.actions.length; index += 1) {
     const action = stepGroup.actions[index];
     if (action.type === "remote") {
@@ -1002,15 +1269,136 @@ async function runStepActions(page, remoteController, stepId, stepGroup) {
     } else if (action.type === "wait") {
       await page.waitForTimeout(action.ms);
       logLine(`STEP ${stepId}: wait ${action.ms}ms`);
+    } else if (action.type === "procedure") {
+      const mode = String(action.mode || "").trim();
+      if (!mode) {
+        logLine(`STEP ${stepId}: procedure action missing mode — ignored`);
+      } else if (options.fromProcedurePack) {
+        logLine(`STEP ${stepId}: procedure mode ${JSON.stringify(mode)} skipped (nested inside procedure pack)`);
+      } else {
+        const pack = getProcedurePack(mode);
+        if (!pack) {
+          logLine(`STEP ${stepId}: procedure mode ${JSON.stringify(mode)} — no matching pack in exports.procedure`);
+        } else {
+          logLine(`STEP ${stepId}: procedure mode ${JSON.stringify(mode)} — running pack`);
+          const packStepGroups = toStepGroups(pack);
+          for (let rsi = 0; rsi < packStepGroups.length; rsi += 1) {
+            const subStepId = `${stepId}-proc-${mode}-${rsi + 1}`;
+            await runStepActions(page, context, remoteController, subStepId, packStepGroups[rsi], {
+              ...options,
+              fromProcedurePack: true,
+            });
+          }
+          logLine(`STEP ${stepId}: procedure mode ${JSON.stringify(mode)} — finished`);
+        }
+      }
+    } else if (action.type === "capture") {
+      const mode = normalizeCaptureMode(action);
+      const captureId =
+        mode === "skip"
+          ? stepId
+          : getCaptureId(stepId, ++savingCaptureOrdinal);
+      await runCaptureAction(
+        page,
+        context,
+        remoteController,
+        captureId,
+        action,
+        options.captureState || { lastCapturedStepId: null },
+        options.planByCaptureIdForRun ?? null,
+      );
     }
   }
 }
 
 async function waitAfterReuse(page, stepId) {
-  const settleMs = Math.max(0, Number(capture.reuseStepSettleMs ?? 0));
-  if (!settleMs) return;
-  await page.waitForTimeout(settleMs);
-  logLine(`STEP ${stepId}: post-reuse settle wait ${settleMs}ms`);
+  const pauseMs = Math.max(0, Number(capture.reusePauseAfterReuseMs ?? 0));
+  if (!pauseMs) return;
+  await page.waitForTimeout(pauseMs);
+  logLine(`STEP ${stepId}: pause after file reuse ${pauseMs}ms`);
+}
+
+function writeReusePlanJsonFile(
+  outPath,
+  { generatedAt, reusePlanOverlayPath, totalsMerged, topicStatsMerged, planByCaptureId },
+) {
+  fs.writeFileSync(
+    outPath,
+    JSON.stringify(
+      {
+        generatedAt,
+        ...(reusePlanOverlayPath
+          ? { reusePlanOverlay: path.relative(process.cwd(), reusePlanOverlayPath) }
+          : {}),
+        totals: totalsMerged,
+        topicStats: topicStatsMerged,
+        decisions: Object.fromEntries(planByCaptureId.entries()),
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+}
+
+function planOnlyMode() {
+  return process.argv.includes("--write-reuse-plan-only");
+}
+
+/** Build a full reuse plan from topic definitions and write it under the capture output dir (no browser). */
+async function writeReusePlanToCaptureDir() {
+  const { topicsFileName, loadedTopics, loadedProcedure } = await loadTopicInstructions();
+  topics = loadedTopics;
+  procedure = loadedProcedure;
+  const runDirTarget = resolveRunDirForTopicsFile(topicsFileName);
+  fs.mkdirSync(runDirTarget, { recursive: true });
+
+  const allTopicEntries = Array.isArray(topics)
+    ? topics.map((topic, idx) => [topic.id || String(idx + 1), topic])
+    : Object.entries(topics);
+  const allowedTopicSet = getAllowedTopicSet();
+  const topicEntries = allowedTopicSet
+    ? allTopicEntries.filter(([id]) => allowedTopicSet.has(String(id).toLowerCase()))
+    : allTopicEntries;
+  if (topicEntries.length === 0) {
+    throw new Error("No topics are available after applying topicPolicy.allowTopicIds.");
+  }
+
+  const startIndex = 0;
+  const endExclusive = topicEntries.length;
+  const reusePlan = buildReusePlan(topicEntries, startIndex, endExclusive);
+  let planByCaptureId = reusePlan.planByCaptureId;
+  const reusePlanOverlayPath = resolveReusePlanOverlayPath();
+  if (reusePlanOverlayPath) {
+    if (!fs.existsSync(reusePlanOverlayPath)) {
+      throw new Error(`Reuse plan overlay not found: ${reusePlanOverlayPath}`);
+    }
+    console.log(`Applying reuse-plan overlay: ${path.relative(process.cwd(), reusePlanOverlayPath)}`);
+    const overlayDecisions = loadReusePlanDecisionsFromFile(reusePlanOverlayPath);
+    planByCaptureId = mergeReusePlanDecisions(planByCaptureId, overlayDecisions);
+  }
+
+  const reusableMerged = countPlanReuseEntries(planByCaptureId);
+  const totalsMerged = {
+    ...reusePlan.totals,
+    reusableSteps: reusableMerged,
+    newCaptureSteps: reusePlan.totals.captureEligibleSteps - reusableMerged,
+  };
+  const topicStatsMerged = topicStatsForPlan(topicEntries, startIndex, endExclusive, planByCaptureId);
+
+  const outPath = path.join(runDirTarget, REUSE_PLAN_FILENAME);
+  writeReusePlanJsonFile(outPath, {
+    generatedAt: reusePlan.generatedAt,
+    reusePlanOverlayPath,
+    totalsMerged,
+    topicStatsMerged,
+    planByCaptureId,
+  });
+  console.log(`Instructions file: scripts/${topicsFileName}`);
+  console.log(`Wrote reuse plan: ${outPath}`);
+  console.log(
+    `${reusableMerged}/${totalsMerged.captureEligibleSteps} capture points marked reusable (plan-driven).`,
+  );
 }
 
 async function run() {
@@ -1065,9 +1453,9 @@ async function run() {
   });
 
   try {
-    const { topicsFileName, loadedTopics, loadedReset } = await loadTopicInstructions();
+    const { topicsFileName, loadedTopics, loadedProcedure } = await loadTopicInstructions();
     topics = loadedTopics;
-    reset = loadedReset;
+    procedure = loadedProcedure;
     runDir = resolveRunDirForTopicsFile(topicsFileName);
     fs.mkdirSync(runDir, { recursive: true });
     console.log(`Instructions file: scripts/${topicsFileName}`);
@@ -1092,6 +1480,22 @@ async function run() {
     await context.storageState({ path: storageStatePath });
     logLine(`SESSION STATE: saved to ${storageStatePath}`);
     console.log(`Session state saved: ${storageStatePath}`);
+    const cliReusePlanOverlayPath = resolveReusePlanOverlayPath();
+    let captureFolderReusePlanPath = null;
+    if (!cliReusePlanOverlayPath) {
+      const defaultReusePath = path.join(runDir, REUSE_PLAN_FILENAME);
+      if (fs.existsSync(defaultReusePath)) {
+        const rel = path.relative(process.cwd(), defaultReusePath);
+        const ans = (
+          await rl.question(`Found reuse plan in capture folder (${rel}). Apply it for this run? [Y/n]: `)
+        )
+          .trim()
+          .toLowerCase();
+        if (ans === "" || ans === "y" || ans === "yes") {
+          captureFolderReusePlanPath = defaultReusePath;
+        }
+      }
+    }
     const promptText = `Press Enter to start from beginning, or type a topic number (${availableTopicIds}): `;
     const startAnswer = (await rl.question(promptText)).trim().toLowerCase();
     let runSingleTopic = false;
@@ -1153,134 +1557,76 @@ async function run() {
     const runLimit = runSingleTopic ? 1 : maxTopics;
     const endExclusive = Math.min(startIndex + runLimit, topicEntries.length);
     const reusePlan = buildReusePlan(topicEntries, startIndex, endExclusive);
-    const reusePlanPath = path.join(runLogDir, "reuse-plan.json");
-    fs.writeFileSync(
-      reusePlanPath,
-      JSON.stringify(
-        {
-          generatedAt: reusePlan.generatedAt,
-          totals: reusePlan.totals,
-          topicStats: reusePlan.topicStats,
-          decisions: Object.fromEntries(reusePlan.planByStepId.entries()),
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
-    const { totals } = reusePlan;
+    let planByCaptureId = reusePlan.planByCaptureId;
+    const reusePlanOverlayPath = cliReusePlanOverlayPath || captureFolderReusePlanPath;
+    if (reusePlanOverlayPath) {
+      if (!fs.existsSync(reusePlanOverlayPath)) {
+        throw new Error(`Reuse plan overlay not found: ${reusePlanOverlayPath}`);
+      }
+      console.log(`Applying reuse-plan overlay: ${path.relative(process.cwd(), reusePlanOverlayPath)}`);
+      const overlayDecisions = loadReusePlanDecisionsFromFile(reusePlanOverlayPath);
+      planByCaptureId = mergeReusePlanDecisions(planByCaptureId, overlayDecisions);
+    }
+
+    const reusableMerged = countPlanReuseEntries(planByCaptureId);
+    const totalsMerged = {
+      ...reusePlan.totals,
+      reusableSteps: reusableMerged,
+      newCaptureSteps: reusePlan.totals.captureEligibleSteps - reusableMerged,
+    };
+    const topicStatsMerged = topicStatsForPlan(topicEntries, startIndex, endExclusive, planByCaptureId);
+
+    const reusePlanPath = path.join(runLogDir, REUSE_PLAN_FILENAME);
+    writeReusePlanJsonFile(reusePlanPath, {
+      generatedAt: reusePlan.generatedAt,
+      reusePlanOverlayPath,
+      totalsMerged,
+      topicStatsMerged,
+      planByCaptureId,
+    });
     logLine(
-      `REUSE PLAN: topics=${totals.topics}, steps=${totals.totalSteps}, captureEligible=${totals.captureEligibleSteps}, reusable=${totals.reusableSteps}, newCaptures=${totals.newCaptureSteps}`,
+      `REUSE PLAN: topics=${totalsMerged.topics}, steps=${totalsMerged.totalSteps}, capturePoints=${totalsMerged.captureEligibleSteps}, reusable=${totalsMerged.reusableSteps}, newCaptures=${totalsMerged.newCaptureSteps}`,
     );
     logLine(`REUSE PLAN FILE: ${path.relative(process.cwd(), reusePlanPath)}`);
     console.log(
-      `Reuse plan ready: ${totals.reusableSteps}/${totals.captureEligibleSteps} capture-eligible steps will reuse existing captures.`,
+      `Reuse plan ready: ${totalsMerged.reusableSteps}/${totalsMerged.captureEligibleSteps} capture points will reuse (plan-driven).`,
     );
     console.log(`Reuse plan saved: ${reusePlanPath}`);
 
-    let lastCapturedStepId = null;
-    for (let i = startIndex; i < endExclusive; i += 1) {
-      const [topicId, topicData] = topicEntries[i];
-      const resetTopic = reset?.["0"];
-      if (resetTopic && shouldRunResetForTopic(i, startIndex)) {
-        logLine(`RESET before topic ${topicId}: started`);
-        const resetStepGroups = toStepGroups(resetTopic);
-        for (let resetStepIndex = 0; resetStepIndex < resetStepGroups.length; resetStepIndex += 1) {
-          const resetStepId = `reset-0-${resetStepIndex + 1}`;
-          await runStepActions(page, remoteController, resetStepId, resetStepGroups[resetStepIndex]);
+    const captureState = { lastCapturedStepId: null };
+
+    async function runTopicSlice(sliceStart, sliceEndExclusive, slicePlan, captureStateForSlice) {
+      for (let i = sliceStart; i < sliceEndExclusive; i += 1) {
+        const [topicId, topicData] = topicEntries[i];
+        const resetPack = getProcedurePack("reset");
+        if (resetPack && shouldRunResetForTopic(i, sliceStart)) {
+          logLine(`RESET (procedure.reset) before topic ${topicId}: started`);
+          const resetStepGroups = toStepGroups(resetPack);
+          for (let resetStepIndex = 0; resetStepIndex < resetStepGroups.length; resetStepIndex += 1) {
+            const resetStepId = `procedure-reset-${resetStepIndex + 1}`;
+            await runStepActions(page, context, remoteController, resetStepId, resetStepGroups[resetStepIndex], {
+              captureState: captureStateForSlice,
+              planByCaptureIdForRun: slicePlan,
+            });
+          }
+          logLine(`RESET (procedure.reset) before topic ${topicId}: finished`);
         }
-        logLine(`RESET before topic ${topicId}: finished`);
+        console.log(`Running topic: ${formatTopicLabel(topicId, topicData)}`);
+        logTopicStarted(topicId, topicData);
+        const stepGroups = toStepGroups(topicData);
+        for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
+          const stepGroup = stepGroups[stepIndex];
+          const stepId = `${topicId}-${stepIndex + 1}`;
+          await runStepActions(page, context, remoteController, stepId, stepGroup, {
+            captureState: captureStateForSlice,
+            planByCaptureIdForRun: slicePlan,
+          });
+        }
+        logLine(`TOPIC ${topicId}: finished`);
       }
-      console.log(`Running topic: ${formatTopicLabel(topicId, topicData)}`);
-      logTopicStarted(topicId, topicData);
-      const stepGroups = toStepGroups(topicData);
-      for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
-        const stepGroup = stepGroups[stepIndex];
-        const stepId = `${topicId}-${stepIndex + 1}`;
-        await runStepActions(page, remoteController, stepId, stepGroup);
-
-        if (stepGroup.reuseImage) {
-          const requestedSource = String(stepGroup.reuseImage).trim();
-          const sourceStepId =
-            requestedSource.toLowerCase() === "previous" ? lastCapturedStepId : requestedSource;
-          if (sourceStepId) {
-            const reuseResult = tryReuseCapture(sourceStepId, stepId);
-            if (reuseResult.copied) {
-              const reuseMsg = `STEP ${stepId}: capture reused from ${sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
-              logLine(reuseMsg);
-              logSummaryLine(reuseMsg);
-              lastCapturedStepId = stepId;
-              await waitAfterReuse(page, stepId);
-              continue;
-            }
-            logCaptureFailure(`STEP ${stepId}: manual reuse failed (${reuseResult.reason})`);
-          } else {
-            logCaptureFailure(`STEP ${stepId}: manual reuse failed (no-previous-capture)`);
-          }
-
-          if (stepGroup.skipLiveCapture) {
-            logLine(`STEP ${stepId}: live capture skipped after manual reuse failure`);
-            continue;
-          }
-        }
-
-        if (stepGroup.skipCapture) {
-          logLine(`STEP ${stepId}: capture skipped`);
-        } else {
-          const stepPlan = reusePlan.planByStepId.get(stepId);
-          if (!stepGroup.forceLiveCapture && stepPlan?.decision === "reuse" && stepPlan.sourceStepId) {
-            const reuseResult = tryReuseCapture(stepPlan.sourceStepId, stepId);
-            if (reuseResult.copied) {
-              const reuseMsg = `STEP ${stepId}: capture reused from ${stepPlan.sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
-              logLine(reuseMsg);
-              logSummaryLine(reuseMsg);
-              lastCapturedStepId = stepId;
-              await waitAfterReuse(page, stepId);
-              continue;
-            }
-            logCaptureFailure(
-              `STEP ${stepId}: reuse failed (${reuseResult.reason}), falling back to live capture`,
-            );
-          }
-
-          let captureResult = { saved: false, reason: "not-attempted" };
-          const maxAttempts = Math.max(1, stepGroup.captureRetries);
-          let preferExistingPopupRetry = false;
-          for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-            logLine(
-              `STEP ${stepId}: capture attempt ${attempt}/${maxAttempts} started`,
-            );
-            captureResult = await triggerRmCapture(page, context, remoteController, stepId, {
-                reuseExistingPopup: preferExistingPopupRetry,
-              }).catch((error) => ({
-              saved: false,
-              reason: error?.message || "capture-attempt-error",
-            }));
-            if (captureResult.saved) {
-              logLine(`STEP ${stepId}: capture saved on attempt ${attempt}`);
-              logSummaryLine(`STEP ${stepId}: capture saved`);
-              lastCapturedStepId = stepId;
-              break;
-            }
-            preferExistingPopupRetry = captureResult.reason === "popup-image-extraction-failed";
-            logCaptureFailure(
-              `STEP ${stepId}: capture failed attempt ${attempt} (${captureResult.reason})`,
-              false,
-            );
-            if (attempt < maxAttempts) {
-              await page.waitForTimeout(stepGroup.retryWaitMs);
-            }
-          }
-          if (!captureResult.saved) {
-            logCaptureFailure(`STEP ${stepId}: capture NOT saved (${captureResult.reason})`);
-            await closeCapturePopups(context, page);
-          }
-        }
-      }
-      logLine(`TOPIC ${topicId}: finished`);
-
-      // Continue automatically to the next topic unless a single topic was selected at prompt.
     }
+
+    await runTopicSlice(startIndex, endExclusive, planByCaptureId, captureState);
 
     console.log(`Capture run complete: ${runDir}`);
     if (runSingleTopic) {
@@ -1293,11 +1639,41 @@ async function run() {
     if (runSummaryLogPath) console.log(`Summary run log: ${runSummaryLogPath}`);
     if (runFailuresLogPath) console.log(`Missed-captures run log: ${runFailuresLogPath}`);
     console.log(`Run logs folder: ${runLogDir}`);
-    const keepBrowserOpenEnvName = capture.keepBrowserOpenEnv || "KEEP_BROWSER_OPEN";
-    if (isEnabledEnv(keepBrowserOpenEnvName, false)) {
-      await rl.question(
-        `${keepBrowserOpenEnvName}: browser left open. Press Enter in this terminal to close Chromium and exit… `,
-      );
+
+    const exitTokens = new Set(["exit", "q", "quit", "bye"]);
+    for (;;) {
+      const followUp = (
+        await rl.question(
+          `Another topic? Type a topic id (${availableTopicIds}), or exit / q to close the browser and quit: `,
+        )
+      )
+        .trim()
+        .toLowerCase();
+      if (exitTokens.has(followUp)) {
+        logLine("FLOW exit requested by user (browser will close)");
+        break;
+      }
+      if (!followUp) {
+        console.log("Type a topic id to run again, or exit / q to quit.");
+        continue;
+      }
+      const matchedFollowUp = findTopicEntry(topicEntries, followUp);
+      if (!matchedFollowUp) {
+        console.log(`Topic "${followUp}" not found. Available: ${availableTopicIds}`);
+        continue;
+      }
+      const [followTopicId] = matchedFollowUp;
+      const followIndex = topicEntries.findIndex(([id]) => id === followTopicId);
+      logLine(`INTERACTIVE follow-up: running topic ${followTopicId}`);
+      const sliceReuse = buildReusePlan(topicEntries, followIndex, followIndex + 1);
+      let slicePlan = sliceReuse.planByCaptureId;
+      if (reusePlanOverlayPath) {
+        const overlayDecisionsFollow = loadReusePlanDecisionsFromFile(reusePlanOverlayPath);
+        slicePlan = mergeReusePlanDecisions(slicePlan, overlayDecisionsFollow);
+      }
+      const followCaptureState = { lastCapturedStepId: null };
+      await runTopicSlice(followIndex, followIndex + 1, slicePlan, followCaptureState);
+      console.log(`Topic finished: ${followTopicId}`);
     }
   } finally {
     process.removeAllListeners("SIGINT");
@@ -1309,9 +1685,18 @@ async function run() {
   }
 }
 
-run()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
+if (planOnlyMode()) {
+  writeReusePlanToCaptureDir()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+} else {
+  run()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+}

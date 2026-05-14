@@ -1,6 +1,6 @@
 # TV Automation
 
-Playwright-based automation for the Samsung RMUS Remote Management portal. Navigates a connected TV via the on-screen remote, triggers graphic captures for each configured topic step, and saves the resulting screenshots locally.
+Playwright-based automation for the Samsung RMUS Remote Management portal. Navigates a connected TV via the on-screen remote, triggers graphic captures at explicit points in the topic steps, and saves the resulting screenshots locally.
 
 ## Target
 
@@ -36,37 +36,41 @@ Playwright-based automation for the Samsung RMUS Remote Management portal. Navig
 | File | Purpose |
 |---|---|
 | `config/automationConfig.js` | Base URL, CSS selectors, delays, logging/network filters |
-| `scripts/2026tv.mjs` | Default topic definitions — which remote key sequences to run and capture |
+| `scripts/2025tv.mjs` | Default topic definitions used by `npm run capture` |
+| `scripts/2026tv.mjs` | Alternate topic definitions used by `npm run capture-2026` |
 
 **Credentials** are read from environment variables (`RMUS_USERNAME`, `RMUS_PASSWORD`). Do not put them directly in `automationConfig.js`.
 
 ### Topic format (`scripts/<topics-file>.mjs`)
 
-Each topic is a keyed entry with an array of steps. Each step is either a bare action array (capture after every step) or an object that gives you more control:
+Each topics file exports `reset` and `topics`. The `reset` export is currently intentionally empty (`export const reset = {};`), so the runner no longer performs an initial reset sequence before the first topic.
+
+Each topic is a keyed entry with optional metadata such as `topic`, `slug`, `topicUrl`, or `imageGroupPrefix`, plus an array of steps. A bare action array runs exactly the actions listed. Captures are only taken when a `capture` action appears inside the array:
 
 ```js
-// Shorthand — capture is taken after this step automatically
+// No capture is taken here
 "1": {
+  slug: "example-topic",
   steps: [
     [
-      { type: "remote", key: "ENTER" },
+      { type: "remote", key: "KEY_ENTER" },
       { type: "wait", ms: 500 },
     ],
   ],
 },
 
-// Object form — disable capture or configure retries
+// Capture happens immediately where the capture action appears.
+// Actions after it still run.
 "2": {
+  topic: "Example Capture Topic",
+  slug: "example-capture-topic",
   steps: [
-    {
-      skipCapture: true,         // no screenshot for this step
-      captureRetries: 5,         // override default retry count
-      retryWaitMs: 1000,
-      actions: [
-        { type: "remote", key: "EXIT" },
-        { type: "wait", ms: 700 },
-      ],
-    },
+    [
+      { type: "remote", key: "KEY_RETURN" },
+      { type: "wait", ms: 700 },
+      { type: "capture", mode: "screen", captureRetries: 5, retryWaitMs: 1000 },
+      { type: "remote", key: "KEY_DOWN" },
+    ],
   ],
 },
 ```
@@ -77,29 +81,44 @@ Supported action types:
 |---|---|---|
 | `remote` | `key` | Clicks the `<area alt="key">` on the remote control map |
 | `wait` | `ms` | Waits the given number of milliseconds |
+| `capture` | `mode`, `reuseImage` | Saves, skips, or reuses a screenshot at that point in the action list |
+
+Capture `mode` values:
+
+| mode | behavior |
+|---|---|
+| `screen` | Fresh RM graphic capture (default if `mode` is omitted) |
+| `reuse` | Copies a previous saved capture, using `reuseImage` such as `"previous"` |
+| `skip` | Skips capture at that point |
 
 ## Running
 
-### Capture all topics
+### Capture all 2025 topics
 
 ```powershell
 npm run capture
 ```
 
+### Capture all 2026 topics
+
+```powershell
+npm run capture-2026
+```
+
 This opens a headed Chromium window, navigates to the RMUS portal, and prompts you to:
 
 1. Log in with your credentials (filled automatically)
-2. Enter the PIN/OTP manually when the portal asks (randomised each session)
+2. Enter the PIN/OTP manually when the portal asks (randomized each session)
 3. Press **Enter** in the terminal once you see the Remote Control page
 
-The script then runs through every topic in the selected topics file (default: `scripts/2026tv.mjs`), pressing the configured remote keys and saving a screenshot after each step.
+The script then runs through every topic in the selected topics file, pressing the configured remote keys and saving screenshots only at explicit `capture` actions. With the current topic files, no initial `reset["0"]` sequence runs.
 
 ### Resume from a specific topic
 
-When prompted, type the topic number instead of pressing Enter:
+When prompted, type the full topic ID instead of pressing Enter. For `g_` topic IDs, you can also type just the numeric suffix:
 
 ```
-Press Enter to start from beginning, or type a topic number (0, 1, 143, 200, 201): 143
+Press Enter to start from beginning, or type a topic number (g_54, g_55, g_56, g_1, g_2): 54
 ```
 
 ### Keep the browser open after a run
@@ -112,10 +131,13 @@ $env:KEEP_BROWSER_OPEN="1"; npm run capture
 
 | Path | Contents |
 |---|---|
-| `captures/` | Screenshots named `<topicId>-<stepNumber>.(png\|jpg)` |
-| `logs/` | Per-run logs (detailed, summary, missed-captures) |
+| `captures/2025tv/` | Screenshots from `npm run capture` |
+| `captures/2026tv/` | Screenshots from `npm run capture-2026` |
+| `logs/run-<timestamp>/` | Per-run logs, summaries, missed captures, and reuse plan |
 
-Both folders are gitignored.
+Screenshots are named `<topicId>-<stepNumber>.(png|jpg)`. Later captures in the same step use `<topicId>-<stepNumber>-captureN`.
+
+These output folders are gitignored.
 
 ## Project Structure
 
@@ -124,10 +146,10 @@ config/
   automationConfig.js   # URL, selectors, delays, logging/network config
 lib/
   helpers.js            # humanDelay, smartScroll, logEvent, popup dismissal, error logging
-  loginFlow.js          # loginAndWaitAuthenticated — handles login + MFA polling
+  loginFlow.js          # loginAndWaitAuthenticated - handles login + MFA polling
 scripts/
-  2026tv.mjs            # Default topic definitions (remote sequences + capture options)
-  2025tv.mjs            # Alternate topic definitions
+  2025tv.mjs            # Default topic definitions for npm run capture
+  2026tv.mjs            # Topic definitions for npm run capture-2026
   run-topic-captures.mjs # Main runner script
 playwright.config.js    # Playwright project config (chromium, storage state, etc.)
 ```
