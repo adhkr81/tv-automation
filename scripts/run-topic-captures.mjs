@@ -15,6 +15,8 @@ const { timeouts = {}, capture = {}, runModes = {}, topicPolicy = {}, healthChec
   automationConfig;
 
 const capturesRootDir = path.join(process.cwd(), capture.outputDir || "captures");
+/** Canonical reuse plan next to PNGs for a topic pack (e.g. captures/2026tv/reuse-plan.json). */
+const REUSE_PLAN_FILENAME = "reuse-plan.json";
 let runDir = capturesRootDir;
 const logsDir = path.join(process.cwd(), "logs");
 /** Minute-level stamp for run folder/log naming (no seconds or milliseconds). */
@@ -29,6 +31,12 @@ const truthyValues = new Set(["1", "true", "yes", "y", "on"]);
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** File basename for captures: drop leading `g_` when present (e.g. `g_2-1` → `2-1`). */
+function captureFileStem(id) {
+  const s = String(id || "");
+  return s.startsWith("g_") ? s.slice(2) : s;
 }
 
 /** @returns {Promise<void>} */
@@ -55,6 +63,71 @@ function resolveTopicsFileName() {
   const rawValue = (cliArg?.slice("--topics=".length) || process.env.TOPICS_FILE || "2026tv").trim();
   if (!rawValue) return "2026tv.mjs";
   return rawValue.endsWith(".mjs") ? rawValue : `${rawValue}.mjs`;
+}
+
+/** Optional JSON overlay: same shape as a saved `reuse-plan.json` (`decisions` object). */
+function resolveReusePlanOverlayPath() {
+  const cliArg = process.argv.find((arg) => arg.startsWith("--reuse-plan="));
+  const fromCli = cliArg?.slice("--reuse-plan=".length)?.trim() ?? "";
+  const fromEnv = (process.env.REUSE_PLAN_PATH || "").trim();
+  const raw = fromCli || fromEnv;
+  if (!raw) return null;
+  return path.isAbsolute(raw) ? raw : path.join(process.cwd(), raw);
+}
+
+function loadReusePlanDecisionsFromFile(filePath) {
+  const raw = fs.readFileSync(filePath, "utf8");
+  const data = JSON.parse(raw);
+  if (!data || typeof data.decisions !== "object" || data.decisions === null) {
+    throw new Error(`Reuse plan file "${filePath}" must contain a "decisions" object.`);
+  }
+  return data.decisions;
+}
+
+function mergeReusePlanDecisions(basePlanMap, overlayDecisions) {
+  const merged = new Map(basePlanMap);
+  for (const [k, v] of Object.entries(overlayDecisions)) {
+    merged.set(k, v);
+  }
+  return merged;
+}
+
+function countPlanReuseEntries(planByCaptureId) {
+  let n = 0;
+  for (const v of planByCaptureId.values()) {
+    if (v?.decision === "manual-reuse" || v?.decision === "fingerprint-reuse") n += 1;
+  }
+  return n;
+}
+
+function topicStatsForPlan(topicEntries, startIndex, endExclusive, planByCaptureId) {
+  const out = [];
+  for (let i = startIndex; i < endExclusive; i += 1) {
+    const [topicId, topicData] = topicEntries[i];
+    const stepGroups = toStepGroups(topicData);
+    let captureEligible = 0;
+    let reusable = 0;
+    for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
+      const stepId = `${topicId}-${stepIndex + 1}`;
+      let savingCaptureOrdinal = 0;
+      for (const act of stepGroups[stepIndex].actions) {
+        if (act?.type !== "capture") continue;
+        if (normalizeCaptureMode(act) === "skip") continue;
+        savingCaptureOrdinal += 1;
+        const captureId = getCaptureId(stepId, savingCaptureOrdinal);
+        captureEligible += 1;
+        const ent = planByCaptureId.get(captureId);
+        if (ent?.decision === "manual-reuse" || ent?.decision === "fingerprint-reuse") reusable += 1;
+      }
+    }
+    out.push({
+      topicId,
+      totalSteps: stepGroups.length,
+      captureEligibleSteps: captureEligible,
+      reusableSteps: reusable,
+    });
+  }
+  return out;
 }
 
 function resolveRunDirForTopicsFile(topicsFileName) {
@@ -701,7 +774,7 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
 
     if (captureData?.base64) {
       const extension = captureData.mime.includes("jpeg") ? "jpg" : "png";
-      const targetPath = path.join(runDir, `${topicId}.${extension}`);
+      const targetPath = path.join(runDir, `${captureFileStem(topicId)}.${extension}`);
       fs.writeFileSync(targetPath, Buffer.from(captureData.base64, "base64"));
       console.log(`RM OSD capture saved from popup: ${targetPath}`);
       saved = true;
@@ -716,7 +789,7 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
         await page.waitForTimeout(200);
       }
     } else if (previewScreenshotBuf && previewScreenshotBuf.length > 50) {
-      const targetPath = path.join(runDir, `${topicId}.png`);
+      const targetPath = path.join(runDir, `${captureFileStem(topicId)}.png`);
       fs.writeFileSync(targetPath, previewScreenshotBuf);
       console.log(`RM OSD capture saved from preview screenshot: ${targetPath}`);
       saved = true;
@@ -750,7 +823,7 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
 
   const download = await downloadPromise;
   if (download) {
-    const filename = `${topicId}-${download.suggestedFilename()}`;
+    const filename = `${captureFileStem(topicId)}-${download.suggestedFilename()}`;
     const targetPath = path.join(runDir, filename);
     await download.saveAs(targetPath);
     console.log(`RM capture downloaded: ${targetPath}`);
@@ -888,7 +961,15 @@ function buildReusePlan(topicEntries, startIndex, endExclusive) {
     const [topicId, topicData] = topicEntries[i];
     const stepGroups = toStepGroups(topicData);
     const resetApplied = Boolean(reset?.["0"] && shouldRunResetForTopic(i, startIndex));
+    /**
+     * Remote/wait signatures from topic start: for each entry in `steps`, only actions from index 0
+     * of that step's array, in order, through the current step up to each capture (then capture-slot markers).
+     * Slot markers use a per-topic 1-based index so two topics with identical remote chains get identical fingerprints.
+     * Matches require the same whole chain since steps[0], not an isolated identical step later.
+     */
     const prefixActionSignatures = [];
+    /** 1-based index of saving captures in this topic only (for fingerprint anchors — avoids g_2-1 vs g_3-1 skewing later keys). */
+    let topicFingerprintCaptureSeq = 0;
     let topicReusable = 0;
     let topicCaptureEligible = 0;
     for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
@@ -916,22 +997,37 @@ function buildReusePlan(topicEntries, startIndex, endExclusive) {
         if (mode === "reuse") {
           reusableSteps += 1;
           topicReusable += 1;
-          fingerprintToSourceStepId.set(fingerprint, captureId);
           planByCaptureId.set(captureId, {
             decision: "manual-reuse",
             sourceStepId: action.reuseImage || "previous",
             fingerprint,
           });
+          fingerprintToSourceStepId.set(fingerprint, captureId);
+          topicFingerprintCaptureSeq += 1;
+          prefixActionSignatures.push(`__capture_anchor:${topicFingerprintCaptureSeq}__`);
           continue;
         }
 
-        fingerprintToSourceStepId.set(fingerprint, captureId);
-        planByCaptureId.set(captureId, {
-          decision: "capture",
-          sourceStepId: null,
-          fingerprint,
-          forceLiveCapture: true,
-        });
+        if (fingerprintToSourceStepId.has(fingerprint)) {
+          const sourceId = fingerprintToSourceStepId.get(fingerprint);
+          reusableSteps += 1;
+          topicReusable += 1;
+          planByCaptureId.set(captureId, {
+            decision: "fingerprint-reuse",
+            sourceStepId: sourceId,
+            fingerprint,
+          });
+        } else {
+          planByCaptureId.set(captureId, {
+            decision: "capture",
+            sourceStepId: null,
+            fingerprint,
+            forceLiveCapture: true,
+          });
+          fingerprintToSourceStepId.set(fingerprint, captureId);
+        }
+        topicFingerprintCaptureSeq += 1;
+        prefixActionSignatures.push(`__capture_anchor:${topicFingerprintCaptureSeq}__`);
       }
     }
     topicStats.push({
@@ -958,9 +1054,16 @@ function buildReusePlan(topicEntries, startIndex, endExclusive) {
 
 function getStepCapturePath(stepId) {
   const extensions = [".png", ".jpg", ".jpeg"];
-  for (const extension of extensions) {
-    const candidate = path.join(runDir, `${stepId}${extension}`);
-    if (fs.existsSync(candidate)) return candidate;
+  const raw = String(stepId || "");
+  const stems = [];
+  const stem = captureFileStem(stepId);
+  stems.push(stem);
+  if (raw !== stem) stems.push(raw);
+  for (const base of stems) {
+    for (const extension of extensions) {
+      const candidate = path.join(runDir, `${base}${extension}`);
+      if (fs.existsSync(candidate)) return candidate;
+    }
   }
   return null;
 }
@@ -971,19 +1074,59 @@ function tryReuseCapture(sourceStepId, targetStepId) {
     return { copied: false, reason: `source-not-found:${sourceStepId}` };
   }
   const extension = path.extname(sourcePath) || ".png";
-  const targetPath = path.join(runDir, `${targetStepId}${extension}`);
+  const targetPath = path.join(runDir, `${captureFileStem(targetStepId)}${extension}`);
   fs.copyFileSync(sourcePath, targetPath);
   return { copied: true, sourcePath, targetPath };
 }
 
-async function runCaptureAction(page, context, remoteController, captureId, action, captureState) {
+async function runCaptureAction(page, context, remoteController, captureId, action, captureState, planByCaptureIdForRun = null) {
   const mode = normalizeCaptureMode(action);
   if (mode === "skip") {
     logLine(`STEP ${captureId}: capture skipped`);
     return;
   }
 
-  if (mode === "reuse") {
+  const planEntry = planByCaptureIdForRun?.get?.(captureId) ?? null;
+  const forceLiveFromPlan = planEntry?.decision === "capture";
+  /** Plan said file reuse but copy did not succeed — still take live capture even if topic `mode: "reuse"` defaults to skipLiveCapture. */
+  let planReuseFileMissingTryLive = false;
+
+  if (
+    planEntry &&
+    (planEntry.decision === "manual-reuse" || planEntry.decision === "fingerprint-reuse")
+  ) {
+    const requestedSource = String(planEntry.sourceStepId ?? "previous").trim();
+    const sourceStepId =
+      requestedSource.toLowerCase() === "previous" ? captureState.lastCapturedStepId : requestedSource;
+    if (sourceStepId) {
+      const reuseResult = tryReuseCapture(sourceStepId, captureId);
+      if (reuseResult.copied) {
+        const tag =
+          planEntry.decision === "fingerprint-reuse" ? "fingerprint-reuse (plan)" : "manual-reuse (plan)";
+        const reuseMsg = `STEP ${captureId}: capture reused from ${sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)}) [${tag}]`;
+        logLine(reuseMsg);
+        logSummaryLine(reuseMsg);
+        console.log(`RM OSD capture reused [${tag}]: ${reuseResult.targetPath} (from ${reuseResult.sourcePath})`);
+        captureState.lastCapturedStepId = captureId;
+        await waitAfterReuse(page, captureId);
+        return;
+      }
+      planReuseFileMissingTryLive = true;
+      logCaptureFailure(
+        `STEP ${captureId}: plan reuse failed (${reuseResult.reason}); attempting live capture`,
+        false,
+      );
+      logLine(`STEP ${captureId}: reuse-plan source file not found for ${sourceStepId} — falling back to RM popup capture`);
+      console.log(`STEP ${captureId}: reuse-plan file missing (${reuseResult.reason}) — live RM capture`);
+    } else {
+      planReuseFileMissingTryLive = true;
+      logCaptureFailure(`STEP ${captureId}: plan reuse failed (no-previous-capture); attempting live capture`, false);
+      logLine(`STEP ${captureId}: reuse-plan had no usable source — falling back to RM popup capture`);
+      console.log(`STEP ${captureId}: reuse-plan had no previous capture — live RM capture`);
+    }
+  }
+
+  if (mode === "reuse" && !forceLiveFromPlan) {
     const requestedSource = String(action.reuseImage || action.sourceStepId || "previous").trim();
     const sourceStepId =
       requestedSource.toLowerCase() === "previous" ? captureState.lastCapturedStepId : requestedSource;
@@ -993,6 +1136,7 @@ async function runCaptureAction(page, context, remoteController, captureId, acti
         const reuseMsg = `STEP ${captureId}: capture reused from ${sourceStepId} (${path.basename(reuseResult.sourcePath)} -> ${path.basename(reuseResult.targetPath)})`;
         logLine(reuseMsg);
         logSummaryLine(reuseMsg);
+        console.log(`RM OSD capture reused [topic action]: ${reuseResult.targetPath} (from ${reuseResult.sourcePath})`);
         captureState.lastCapturedStepId = captureId;
         await waitAfterReuse(page, captureId);
         return;
@@ -1002,7 +1146,7 @@ async function runCaptureAction(page, context, remoteController, captureId, acti
       logCaptureFailure(`STEP ${captureId}: manual reuse failed (no-previous-capture)`);
     }
 
-    if (action.skipLiveCapture !== false) {
+    if (action.skipLiveCapture !== false && !planReuseFileMissingTryLive) {
       logLine(`STEP ${captureId}: live capture skipped after manual reuse failure`);
       return;
     }
@@ -1074,16 +1218,100 @@ async function runStepActions(page, context, remoteController, stepId, stepGroup
         captureId,
         action,
         options.captureState || { lastCapturedStepId: null },
+        options.planByCaptureIdForRun ?? null,
       );
     }
   }
 }
 
 async function waitAfterReuse(page, stepId) {
-  const settleMs = Math.max(0, Number(capture.reuseStepSettleMs ?? 0));
-  if (!settleMs) return;
-  await page.waitForTimeout(settleMs);
-  logLine(`STEP ${stepId}: post-reuse settle wait ${settleMs}ms`);
+  const pauseMs = Math.max(0, Number(capture.reusePauseAfterReuseMs ?? 0));
+  if (!pauseMs) return;
+  await page.waitForTimeout(pauseMs);
+  logLine(`STEP ${stepId}: pause after file reuse ${pauseMs}ms`);
+}
+
+function writeReusePlanJsonFile(
+  outPath,
+  { generatedAt, reusePlanOverlayPath, totalsMerged, topicStatsMerged, planByCaptureId },
+) {
+  fs.writeFileSync(
+    outPath,
+    JSON.stringify(
+      {
+        generatedAt,
+        ...(reusePlanOverlayPath
+          ? { reusePlanOverlay: path.relative(process.cwd(), reusePlanOverlayPath) }
+          : {}),
+        totals: totalsMerged,
+        topicStats: topicStatsMerged,
+        decisions: Object.fromEntries(planByCaptureId.entries()),
+      },
+      null,
+      2,
+    ),
+    "utf8",
+  );
+}
+
+function planOnlyMode() {
+  return process.argv.includes("--write-reuse-plan-only");
+}
+
+/** Build a full reuse plan from topic definitions and write it under the capture output dir (no browser). */
+async function writeReusePlanToCaptureDir() {
+  const { topicsFileName, loadedTopics, loadedReset } = await loadTopicInstructions();
+  topics = loadedTopics;
+  reset = loadedReset;
+  const runDirTarget = resolveRunDirForTopicsFile(topicsFileName);
+  fs.mkdirSync(runDirTarget, { recursive: true });
+
+  const allTopicEntries = Array.isArray(topics)
+    ? topics.map((topic, idx) => [topic.id || String(idx + 1), topic])
+    : Object.entries(topics);
+  const allowedTopicSet = getAllowedTopicSet();
+  const topicEntries = allowedTopicSet
+    ? allTopicEntries.filter(([id]) => allowedTopicSet.has(String(id).toLowerCase()))
+    : allTopicEntries;
+  if (topicEntries.length === 0) {
+    throw new Error("No topics are available after applying topicPolicy.allowTopicIds.");
+  }
+
+  const startIndex = 0;
+  const endExclusive = topicEntries.length;
+  const reusePlan = buildReusePlan(topicEntries, startIndex, endExclusive);
+  let planByCaptureId = reusePlan.planByCaptureId;
+  const reusePlanOverlayPath = resolveReusePlanOverlayPath();
+  if (reusePlanOverlayPath) {
+    if (!fs.existsSync(reusePlanOverlayPath)) {
+      throw new Error(`Reuse plan overlay not found: ${reusePlanOverlayPath}`);
+    }
+    console.log(`Applying reuse-plan overlay: ${path.relative(process.cwd(), reusePlanOverlayPath)}`);
+    const overlayDecisions = loadReusePlanDecisionsFromFile(reusePlanOverlayPath);
+    planByCaptureId = mergeReusePlanDecisions(planByCaptureId, overlayDecisions);
+  }
+
+  const reusableMerged = countPlanReuseEntries(planByCaptureId);
+  const totalsMerged = {
+    ...reusePlan.totals,
+    reusableSteps: reusableMerged,
+    newCaptureSteps: reusePlan.totals.captureEligibleSteps - reusableMerged,
+  };
+  const topicStatsMerged = topicStatsForPlan(topicEntries, startIndex, endExclusive, planByCaptureId);
+
+  const outPath = path.join(runDirTarget, REUSE_PLAN_FILENAME);
+  writeReusePlanJsonFile(outPath, {
+    generatedAt: reusePlan.generatedAt,
+    reusePlanOverlayPath,
+    totalsMerged,
+    topicStatsMerged,
+    planByCaptureId,
+  });
+  console.log(`Instructions file: scripts/${topicsFileName}`);
+  console.log(`Wrote reuse plan: ${outPath}`);
+  console.log(
+    `${reusableMerged}/${totalsMerged.captureEligibleSteps} capture points marked reusable (plan-driven).`,
+  );
 }
 
 async function run() {
@@ -1165,6 +1393,22 @@ async function run() {
     await context.storageState({ path: storageStatePath });
     logLine(`SESSION STATE: saved to ${storageStatePath}`);
     console.log(`Session state saved: ${storageStatePath}`);
+    const cliReusePlanOverlayPath = resolveReusePlanOverlayPath();
+    let captureFolderReusePlanPath = null;
+    if (!cliReusePlanOverlayPath) {
+      const defaultReusePath = path.join(runDir, REUSE_PLAN_FILENAME);
+      if (fs.existsSync(defaultReusePath)) {
+        const rel = path.relative(process.cwd(), defaultReusePath);
+        const ans = (
+          await rl.question(`Found reuse plan in capture folder (${rel}). Apply it for this run? [Y/n]: `)
+        )
+          .trim()
+          .toLowerCase();
+        if (ans === "" || ans === "y" || ans === "yes") {
+          captureFolderReusePlanPath = defaultReusePath;
+        }
+      }
+    }
     const promptText = `Press Enter to start from beginning, or type a topic number (${availableTopicIds}): `;
     const startAnswer = (await rl.question(promptText)).trim().toLowerCase();
     let runSingleTopic = false;
@@ -1226,28 +1470,39 @@ async function run() {
     const runLimit = runSingleTopic ? 1 : maxTopics;
     const endExclusive = Math.min(startIndex + runLimit, topicEntries.length);
     const reusePlan = buildReusePlan(topicEntries, startIndex, endExclusive);
-    const reusePlanPath = path.join(runLogDir, "reuse-plan.json");
-    fs.writeFileSync(
-      reusePlanPath,
-      JSON.stringify(
-        {
-          generatedAt: reusePlan.generatedAt,
-          totals: reusePlan.totals,
-          topicStats: reusePlan.topicStats,
-          decisions: Object.fromEntries(reusePlan.planByCaptureId.entries()),
-        },
-        null,
-        2,
-      ),
-      "utf8",
-    );
-    const { totals } = reusePlan;
+    let planByCaptureId = reusePlan.planByCaptureId;
+    const reusePlanOverlayPath = cliReusePlanOverlayPath || captureFolderReusePlanPath;
+    if (reusePlanOverlayPath) {
+      if (!fs.existsSync(reusePlanOverlayPath)) {
+        throw new Error(`Reuse plan overlay not found: ${reusePlanOverlayPath}`);
+      }
+      console.log(`Applying reuse-plan overlay: ${path.relative(process.cwd(), reusePlanOverlayPath)}`);
+      const overlayDecisions = loadReusePlanDecisionsFromFile(reusePlanOverlayPath);
+      planByCaptureId = mergeReusePlanDecisions(planByCaptureId, overlayDecisions);
+    }
+
+    const reusableMerged = countPlanReuseEntries(planByCaptureId);
+    const totalsMerged = {
+      ...reusePlan.totals,
+      reusableSteps: reusableMerged,
+      newCaptureSteps: reusePlan.totals.captureEligibleSteps - reusableMerged,
+    };
+    const topicStatsMerged = topicStatsForPlan(topicEntries, startIndex, endExclusive, planByCaptureId);
+
+    const reusePlanPath = path.join(runLogDir, REUSE_PLAN_FILENAME);
+    writeReusePlanJsonFile(reusePlanPath, {
+      generatedAt: reusePlan.generatedAt,
+      reusePlanOverlayPath,
+      totalsMerged,
+      topicStatsMerged,
+      planByCaptureId,
+    });
     logLine(
-      `REUSE PLAN: topics=${totals.topics}, steps=${totals.totalSteps}, capturePoints=${totals.captureEligibleSteps}, reusable=${totals.reusableSteps}, newCaptures=${totals.newCaptureSteps}`,
+      `REUSE PLAN: topics=${totalsMerged.topics}, steps=${totalsMerged.totalSteps}, capturePoints=${totalsMerged.captureEligibleSteps}, reusable=${totalsMerged.reusableSteps}, newCaptures=${totalsMerged.newCaptureSteps}`,
     );
     logLine(`REUSE PLAN FILE: ${path.relative(process.cwd(), reusePlanPath)}`);
     console.log(
-      `Reuse plan ready: ${totals.reusableSteps}/${totals.captureEligibleSteps} explicit capture points will reuse existing captures.`,
+      `Reuse plan ready: ${totalsMerged.reusableSteps}/${totalsMerged.captureEligibleSteps} capture points will reuse (plan-driven).`,
     );
     console.log(`Reuse plan saved: ${reusePlanPath}`);
 
@@ -1262,6 +1517,7 @@ async function run() {
           const resetStepId = `reset-0-${resetStepIndex + 1}`;
           await runStepActions(page, context, remoteController, resetStepId, resetStepGroups[resetStepIndex], {
             captureState,
+            planByCaptureIdForRun: planByCaptureId,
           });
         }
         logLine(`RESET before topic ${topicId}: finished`);
@@ -1273,8 +1529,8 @@ async function run() {
         const stepGroup = stepGroups[stepIndex];
         const stepId = `${topicId}-${stepIndex + 1}`;
         await runStepActions(page, context, remoteController, stepId, stepGroup, {
-          reusePlan,
           captureState,
+          planByCaptureIdForRun: planByCaptureId,
         });
       }
       logLine(`TOPIC ${topicId}: finished`);
@@ -1309,9 +1565,18 @@ async function run() {
   }
 }
 
-run()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
+if (planOnlyMode()) {
+  writeReusePlanToCaptureDir()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+} else {
+  run()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+}
