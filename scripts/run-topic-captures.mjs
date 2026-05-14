@@ -25,8 +25,18 @@ const runLogDir = path.join(logsDir, `run-${runStamp}`);
 let runLogPath = "";
 let runSummaryLogPath = "";
 let runFailuresLogPath = "";
-let reset = {};
+let procedure = {};
 let topics = {};
+
+function getProcedurePack(mode) {
+  const raw = String(mode ?? "").trim();
+  if (!raw || procedure == null || typeof procedure !== "object") return null;
+  if (procedure[raw] != null) return procedure[raw];
+  const lowered = raw.toLowerCase();
+  if (procedure[lowered] != null) return procedure[lowered];
+  return null;
+}
+
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -145,15 +155,37 @@ async function loadTopicInstructions() {
 
   const topicsModule = await import(`./${topicsFileName}`);
   const loadedTopics = topicsModule.topics;
-  const loadedReset = topicsModule.reset;
+  const hasProcedureExport = topicsModule.procedure != null && typeof topicsModule.procedure === "object";
+  const hasLegacyResetExport = topicsModule.reset != null && typeof topicsModule.reset === "object";
   if (!loadedTopics || typeof loadedTopics !== "object") {
     throw new Error(`Topics file "${topicsFileName}" must export a "topics" object.`);
   }
-  if (!loadedReset || typeof loadedReset !== "object") {
-    throw new Error(`Topics file "${topicsFileName}" must export a "reset" object.`);
+  if (!hasProcedureExport && !hasLegacyResetExport) {
+    throw new Error(
+      `Topics file "${topicsFileName}" must export a "procedure" object (or legacy "reset" object).`,
+    );
   }
 
-  return { topicsFileName, loadedTopics, loadedReset };
+  const loadedProcedure = normalizeProcedureExport(topicsModule);
+
+  return { topicsFileName, loadedTopics, loadedProcedure };
+}
+
+/** Merge `export const procedure` with legacy `reset["0"]` → `procedure.reset` when absent. */
+function normalizeProcedureExport(topicsModule) {
+  const proc = topicsModule.procedure;
+  const legacy = topicsModule.reset;
+  if (proc != null && typeof proc === "object") {
+    const merged = { ...proc };
+    if (merged.reset == null && legacy?.["0"] != null && typeof legacy["0"] === "object") {
+      merged.reset = legacy["0"];
+    }
+    return merged;
+  }
+  if (legacy != null && typeof legacy === "object" && legacy["0"] != null && typeof legacy["0"] === "object") {
+    return { reset: legacy["0"] };
+  }
+  return {};
 }
 
 function applyLogTemplate(template, topicId) {
@@ -517,7 +549,7 @@ async function triggerRmCapture(page, context, remoteController, topicId, option
           featureFlags.enableHeartbeatRedKey === false
             ? null
             : async () => {
-                await remoteController.pressKey(capture.heartbeatKey || "KEY_RED");
+                await pressRemoteKey(remoteController, capture.heartbeatKey || "KEY_RED");
                 logLine(`STEP ${topicId}: heartbeat "${capture.heartbeatKey || "KEY_RED"}" sent while RM inactive`);
               },
         inactiveIntervalMs: capture.heartbeatIntervalMs ?? 10000,
@@ -911,6 +943,7 @@ function actionToSignature(action) {
   const type = String(action?.type || "unknown");
   if (type === "remote") return `remote:${String(action?.key || "")}`;
   if (type === "wait") return `wait:${Number(action?.ms || 0)}`;
+  if (type === "procedure") return `procedure:${String(action?.mode || "").trim().toLowerCase()}`;
   return `${type}:${JSON.stringify(action ?? {})}`;
 }
 
@@ -918,9 +951,39 @@ function getDefaultStepWaitMs() {
   return Math.max(0, Number(timeouts.defaultStepWaitMs ?? 800));
 }
 
-function appendNormalizedActionSignatures(signatures, actions, index) {
+/**
+ * Inline `{ type: "procedure", mode: "<name>" }` expands to the remote/wait chain of `procedure[<name>]`
+ * (for reuse fingerprints). Nested `{ type: "procedure" }` inside that pack is not expanded again.
+ */
+function appendProcedurePackSignatures(signatures, procedureMode, expandNestedProcedure) {
+  const modeKey = String(procedureMode ?? "").trim();
+  const pack = getProcedurePack(modeKey);
+  if (!pack) {
+    signatures.push(`procedure:${modeKey.toLowerCase() || "unknown"}:missing-pack`);
+    return;
+  }
+  const packStepGroups = toStepGroups(pack);
+  for (const stepGroup of packStepGroups) {
+    for (let ai = 0; ai < stepGroup.actions.length; ai += 1) {
+      appendNormalizedActionSignatures(signatures, stepGroup.actions, ai, {
+        expandProcedure: expandNestedProcedure,
+      });
+    }
+  }
+}
+
+function appendNormalizedActionSignatures(signatures, actions, index, options = {}) {
+  const expandProcedure = options.expandProcedure !== false;
   const defaultStepWaitMs = getDefaultStepWaitMs();
   const action = actions[index];
+  if (expandProcedure && action?.type === "procedure") {
+    const mode = String(action?.mode || "").trim();
+    if (mode) {
+      signatures.push(actionToSignature(action));
+      appendProcedurePackSignatures(signatures, mode, false);
+      return;
+    }
+  }
   if (action?.type === "remote" || action?.type === "wait") {
     signatures.push(actionToSignature(action));
     if (action?.type === "remote") {
@@ -952,7 +1015,7 @@ function buildReusePlan(topicEntries, startIndex, endExclusive) {
   for (let i = startIndex; i < endExclusive; i += 1) {
     const [topicId, topicData] = topicEntries[i];
     const stepGroups = toStepGroups(topicData);
-    const resetApplied = Boolean(reset?.["0"] && shouldRunResetForTopic(i, startIndex));
+    const resetApplied = Boolean(getProcedurePack("reset") && shouldRunResetForTopic(i, startIndex));
     /**
      * Remote/wait signatures from topic start: for each entry in `steps`, only actions from index 0
      * of that step's array, in order, through the current step up to each capture (then capture-slot markers).
@@ -973,7 +1036,7 @@ function buildReusePlan(topicEntries, startIndex, endExclusive) {
       for (let actionIndex = 0; actionIndex < stepGroup.actions.length; actionIndex += 1) {
         const action = stepGroup.actions[actionIndex];
         if (action?.type !== "capture") {
-          appendNormalizedActionSignatures(prefixActionSignatures, stepGroup.actions, actionIndex);
+          appendNormalizedActionSignatures(prefixActionSignatures, stepGroup.actions, actionIndex, {});
           continue;
         }
 
@@ -1206,6 +1269,29 @@ async function runStepActions(page, context, remoteController, stepId, stepGroup
     } else if (action.type === "wait") {
       await page.waitForTimeout(action.ms);
       logLine(`STEP ${stepId}: wait ${action.ms}ms`);
+    } else if (action.type === "procedure") {
+      const mode = String(action.mode || "").trim();
+      if (!mode) {
+        logLine(`STEP ${stepId}: procedure action missing mode — ignored`);
+      } else if (options.fromProcedurePack) {
+        logLine(`STEP ${stepId}: procedure mode ${JSON.stringify(mode)} skipped (nested inside procedure pack)`);
+      } else {
+        const pack = getProcedurePack(mode);
+        if (!pack) {
+          logLine(`STEP ${stepId}: procedure mode ${JSON.stringify(mode)} — no matching pack in exports.procedure`);
+        } else {
+          logLine(`STEP ${stepId}: procedure mode ${JSON.stringify(mode)} — running pack`);
+          const packStepGroups = toStepGroups(pack);
+          for (let rsi = 0; rsi < packStepGroups.length; rsi += 1) {
+            const subStepId = `${stepId}-proc-${mode}-${rsi + 1}`;
+            await runStepActions(page, context, remoteController, subStepId, packStepGroups[rsi], {
+              ...options,
+              fromProcedurePack: true,
+            });
+          }
+          logLine(`STEP ${stepId}: procedure mode ${JSON.stringify(mode)} — finished`);
+        }
+      }
     } else if (action.type === "capture") {
       const mode = normalizeCaptureMode(action);
       const captureId =
@@ -1261,9 +1347,9 @@ function planOnlyMode() {
 
 /** Build a full reuse plan from topic definitions and write it under the capture output dir (no browser). */
 async function writeReusePlanToCaptureDir() {
-  const { topicsFileName, loadedTopics, loadedReset } = await loadTopicInstructions();
+  const { topicsFileName, loadedTopics, loadedProcedure } = await loadTopicInstructions();
   topics = loadedTopics;
-  reset = loadedReset;
+  procedure = loadedProcedure;
   const runDirTarget = resolveRunDirForTopicsFile(topicsFileName);
   fs.mkdirSync(runDirTarget, { recursive: true });
 
@@ -1367,9 +1453,9 @@ async function run() {
   });
 
   try {
-    const { topicsFileName, loadedTopics, loadedReset } = await loadTopicInstructions();
+    const { topicsFileName, loadedTopics, loadedProcedure } = await loadTopicInstructions();
     topics = loadedTopics;
-    reset = loadedReset;
+    procedure = loadedProcedure;
     runDir = resolveRunDirForTopicsFile(topicsFileName);
     fs.mkdirSync(runDir, { recursive: true });
     console.log(`Instructions file: scripts/${topicsFileName}`);
@@ -1512,18 +1598,18 @@ async function run() {
     async function runTopicSlice(sliceStart, sliceEndExclusive, slicePlan, captureStateForSlice) {
       for (let i = sliceStart; i < sliceEndExclusive; i += 1) {
         const [topicId, topicData] = topicEntries[i];
-        const resetTopic = reset?.["0"];
-        if (resetTopic && shouldRunResetForTopic(i, sliceStart)) {
-          logLine(`RESET before topic ${topicId}: started`);
-          const resetStepGroups = toStepGroups(resetTopic);
+        const resetPack = getProcedurePack("reset");
+        if (resetPack && shouldRunResetForTopic(i, sliceStart)) {
+          logLine(`RESET (procedure.reset) before topic ${topicId}: started`);
+          const resetStepGroups = toStepGroups(resetPack);
           for (let resetStepIndex = 0; resetStepIndex < resetStepGroups.length; resetStepIndex += 1) {
-            const resetStepId = `reset-0-${resetStepIndex + 1}`;
+            const resetStepId = `procedure-reset-${resetStepIndex + 1}`;
             await runStepActions(page, context, remoteController, resetStepId, resetStepGroups[resetStepIndex], {
               captureState: captureStateForSlice,
               planByCaptureIdForRun: slicePlan,
             });
           }
-          logLine(`RESET before topic ${topicId}: finished`);
+          logLine(`RESET (procedure.reset) before topic ${topicId}: finished`);
         }
         console.log(`Running topic: ${formatTopicLabel(topicId, topicData)}`);
         logTopicStarted(topicId, topicData);
