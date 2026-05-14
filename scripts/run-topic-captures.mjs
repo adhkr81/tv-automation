@@ -939,6 +939,121 @@ function toStepGroups(topicData) {
   });
 }
 
+/**
+ * Parse topic + step selection (1-based steps, inclusive). Returns null when the input is
+ * only a whole-topic id (e.g. `3` or `g_3`) — caller uses `findTopicEntry` for that.
+ *
+ * Forms (topic `3` is numeric alias for `g_3`, etc.). For a narrowed run, steps **before** the first
+ * listed step still **execute** (remotes / waits / procedures) but **captures are skipped** so the TV
+ * reaches the same state as a full run; captures run normally from the first listed step onward.
+ *
+ * - `3-5` → topic 3: navigate steps **1–4** without capture, then step **5** with capture (`3-5.png`)
+ * - `3-5-7` → steps **1–4** without capture, then **5–7** with captures
+ * - `3-5+` → steps **1–4** without capture, then **5** through last step with captures
+ * - `3-5-7+` → steps **1–4** without capture, then **5** through last step with captures
+ * - `g_3-5`, `g_3-5-7`, `g_3-5+`, … same pattern after the topic prefix
+ */
+function parseTopicStepRunInput(rawInput, topicEntries) {
+  const raw = String(rawInput || "").trim();
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  const plusToEnd = lower.endsWith("+");
+  const core = plusToEnd ? lower.slice(0, -1) : lower;
+  if (plusToEnd && core.length === 0) {
+    throw new Error(`Invalid trailing "+" in "${rawInput}".`);
+  }
+
+  function validateAndReturn(topicId, topicData, from1, to1Inclusive) {
+    const nSteps = toStepGroups(topicData).length;
+    if (nSteps === 0) throw new Error(`Topic "${topicId}" has no steps.`);
+    if (from1 < 1 || from1 > nSteps) {
+      throw new Error(`Topic "${topicId}" has ${nSteps} step(s); start step ${from1} is out of range.`);
+    }
+    if (to1Inclusive != null) {
+      if (to1Inclusive < from1) {
+        throw new Error(`Invalid step range in "${rawInput}": end step is before start step.`);
+      }
+      if (to1Inclusive > nSteps) {
+        throw new Error(`Topic "${topicId}" only has ${nSteps} step(s); cannot run through step ${to1Inclusive}.`);
+      }
+    }
+    return { topicId, from1, to1Inclusive };
+  }
+
+  // Whole-topic numeric id only (no step suffix)
+  if (/^\d+$/.test(core)) return null;
+
+  // Numeric-only: `3-5`, `3-5-7`, optional trailing `+` already stripped into `core`
+  const m3 = core.match(/^(\d+)-(\d+)-(\d+)$/);
+  if (m3) {
+    const topicAlias = m3[1];
+    const from1 = Number(m3[2]);
+    const toNum = Number(m3[3]);
+    const matched = findTopicEntry(topicEntries, topicAlias);
+    if (!matched) return null;
+    if (!plusToEnd && from1 > toNum) {
+      throw new Error(`Invalid step range "${rawInput}": first step (${from1}) is after last step (${toNum}).`);
+    }
+    if (plusToEnd) {
+      return validateAndReturn(matched[0], matched[1], from1, null);
+    }
+    return validateAndReturn(matched[0], matched[1], from1, toNum);
+  }
+
+  const m2 = core.match(/^(\d+)-(\d+)$/);
+  if (m2) {
+    const topicAlias = m2[1];
+    const stepOnly = Number(m2[2]);
+    const matched = findTopicEntry(topicEntries, topicAlias);
+    if (!matched) return null;
+    if (plusToEnd) {
+      return validateAndReturn(matched[0], matched[1], stepOnly, null);
+    }
+    return validateAndReturn(matched[0], matched[1], stepOnly, stepOnly);
+  }
+
+  // Prefixed ids: longest topic id first so `g_10` wins over `g_1`
+  const sortedIds = [...new Set(topicEntries.map(([id]) => String(id)))].sort((a, b) => b.length - a.length);
+  for (const id of sortedIds) {
+    const idLower = id.toLowerCase();
+    if (core === idLower) return null;
+    if (!core.startsWith(`${idLower}-`)) continue;
+    const remainder = core.slice(idLower.length + 1);
+    const matched = topicEntries.find(([tid]) => tid === id);
+    if (!matched) continue;
+
+    const mR2 = remainder.match(/^(\d+)-(\d+)$/);
+    if (mR2) {
+      const from1 = Number(mR2[1]);
+      const toNum = Number(mR2[2]);
+      if (from1 > toNum) {
+        throw new Error(
+          `Invalid step range "${rawInput}" after topic "${id}": first step (${from1}) is after last step (${toNum}).`,
+        );
+      }
+      if (plusToEnd) {
+        return validateAndReturn(matched[0], matched[1], from1, null);
+      }
+      return validateAndReturn(matched[0], matched[1], from1, toNum);
+    }
+
+    const mR1 = remainder.match(/^(\d+)$/);
+    if (mR1) {
+      const n = Number(mR1[1]);
+      if (plusToEnd) {
+        return validateAndReturn(matched[0], matched[1], n, null);
+      }
+      return validateAndReturn(matched[0], matched[1], n, n);
+    }
+
+    throw new Error(
+      `Could not parse step part "${remainder}" for topic "${id}". Use forms like ${id}-5 (step 5), ${id}-5-7 (steps 5–7), ${id}-5+.`,
+    );
+  }
+
+  return null;
+}
+
 function actionToSignature(action) {
   const type = String(action?.type || "unknown");
   if (type === "remote") return `remote:${String(action?.key || "")}`;
@@ -1293,6 +1408,10 @@ async function runStepActions(page, context, remoteController, stepId, stepGroup
         }
       }
     } else if (action.type === "capture") {
+      if (options.suppressCaptures) {
+        logLine(`STEP ${stepId}: capture suppressed (lead-in — remotes/waits still applied)`);
+        continue;
+      }
       const mode = normalizeCaptureMode(action);
       const captureId =
         mode === "skip"
@@ -1496,26 +1615,39 @@ async function run() {
         }
       }
     }
-    const promptText = `Press Enter to start from beginning, or type a topic number (${availableTopicIds}): `;
-    const startAnswer = (await rl.question(promptText)).trim().toLowerCase();
+    const promptText =
+      `Press Enter to start from beginning, or type a topic id (${availableTopicIds}).\n`;
+    const startAnswerRaw = (await rl.question(promptText)).trim();
+    const startAnswer = startAnswerRaw.toLowerCase();
     let runSingleTopic = false;
+    let firstTopicStepWindow = null;
     if (startAnswer) {
-      const matched = findTopicEntry(topicEntries, startAnswer);
-      if (!matched) {
-        throw new Error(`Topic "${startAnswer}" not found. Available topics: ${availableTopicIds}`);
-      }
-      startTopicId = matched[0];
-      const modeAnswer = (
-        await rl.question(
-          `Choose run mode for topic ${startTopicId}:\n1. only this topic\n2. start from topic ${startTopicId}\nSelect option (1/2, default 2): `,
+      const stepRun = parseTopicStepRunInput(startAnswerRaw, topicEntries);
+      if (stepRun) {
+        startTopicId = stepRun.topicId;
+        firstTopicStepWindow = {
+          from1: stepRun.from1,
+          to1Inclusive: stepRun.to1Inclusive,
+        };
+        runSingleTopic = true;
+      } else {
+        const matched = findTopicEntry(topicEntries, startAnswer);
+        if (!matched) {
+          throw new Error(`Topic "${startAnswerRaw}" not found. Available topics: ${availableTopicIds}`);
+        }
+        startTopicId = matched[0];
+        const modeAnswer = (
+          await rl.question(
+            `Choose run mode for topic ${startTopicId}:\n1. only this topic\n2. start from topic ${startTopicId}\nSelect option (1/2, default 2): `,
+          )
         )
-      )
-        .trim()
-        .toLowerCase();
-      if (modeAnswer && modeAnswer !== "1" && modeAnswer !== "2") {
-        throw new Error(`Invalid run mode "${modeAnswer}". Choose 1 (only this topic) or 2 (start from topic).`);
+          .trim()
+          .toLowerCase();
+        if (modeAnswer && modeAnswer !== "1" && modeAnswer !== "2") {
+          throw new Error(`Invalid run mode "${modeAnswer}". Choose 1 (only this topic) or 2 (start from topic).`);
+        }
+        runSingleTopic = modeAnswer === "1";
       }
-      runSingleTopic = modeAnswer === "1";
     }
 
     let startIndex = 0;
@@ -1595,7 +1727,7 @@ async function run() {
 
     const captureState = { lastCapturedStepId: null };
 
-    async function runTopicSlice(sliceStart, sliceEndExclusive, slicePlan, captureStateForSlice) {
+    async function runTopicSlice(sliceStart, sliceEndExclusive, slicePlan, captureStateForSlice, topicStepWindow = null) {
       for (let i = sliceStart; i < sliceEndExclusive; i += 1) {
         const [topicId, topicData] = topicEntries[i];
         const resetPack = getProcedurePack("reset");
@@ -1614,19 +1746,42 @@ async function run() {
         console.log(`Running topic: ${formatTopicLabel(topicId, topicData)}`);
         logTopicStarted(topicId, topicData);
         const stepGroups = toStepGroups(topicData);
-        for (let stepIndex = 0; stepIndex < stepGroups.length; stepIndex += 1) {
+        let stepBegin = 0;
+        let stepEndExclusive = stepGroups.length;
+        const windowActive = Boolean(topicStepWindow && i === topicStepWindow.topicIndex);
+        if (windowActive) {
+          const { from1, to1Inclusive } = topicStepWindow;
+          if (from1 > stepGroups.length) {
+            throw new Error(
+              `Start step ${from1} is past the last step (${stepGroups.length}) of topic ${topicId}.`,
+            );
+          }
+          stepBegin = 0;
+          stepEndExclusive =
+            to1Inclusive == null ? stepGroups.length : Math.min(stepGroups.length, to1Inclusive);
+        }
+        for (let stepIndex = stepBegin; stepIndex < stepEndExclusive; stepIndex += 1) {
           const stepGroup = stepGroups[stepIndex];
           const stepId = `${topicId}-${stepIndex + 1}`;
+          const stepNum1 = stepIndex + 1;
+          const suppressCaptures = windowActive && stepNum1 < topicStepWindow.from1;
           await runStepActions(page, context, remoteController, stepId, stepGroup, {
             captureState: captureStateForSlice,
             planByCaptureIdForRun: slicePlan,
+            suppressCaptures,
           });
         }
         logLine(`TOPIC ${topicId}: finished`);
       }
     }
 
-    await runTopicSlice(startIndex, endExclusive, planByCaptureId, captureState);
+    await runTopicSlice(
+      startIndex,
+      endExclusive,
+      planByCaptureId,
+      captureState,
+      firstTopicStepWindow ? { topicIndex: startIndex, ...firstTopicStepWindow } : null,
+    );
 
     console.log(`Capture run complete: ${runDir}`);
     if (runSingleTopic) {
@@ -1642,13 +1797,12 @@ async function run() {
 
     const exitTokens = new Set(["exit", "q", "quit", "bye"]);
     for (;;) {
-      const followUp = (
+      const followUpRaw = (
         await rl.question(
-          `Another topic? Type a topic id (${availableTopicIds}), or exit / q to close the browser and quit: `,
+          `Another topic? Id (${availableTopicIds}), or exit / q:\n`,
         )
-      )
-        .trim()
-        .toLowerCase();
+      ).trim();
+      const followUp = followUpRaw.toLowerCase();
       if (exitTokens.has(followUp)) {
         logLine("FLOW exit requested by user (browser will close)");
         break;
@@ -1657,13 +1811,31 @@ async function run() {
         console.log("Type a topic id to run again, or exit / q to quit.");
         continue;
       }
-      const matchedFollowUp = findTopicEntry(topicEntries, followUp);
-      if (!matchedFollowUp) {
-        console.log(`Topic "${followUp}" not found. Available: ${availableTopicIds}`);
+      let followTopicId;
+      let followTopicStepWindow = null;
+      const followStepParsed = parseTopicStepRunInput(followUpRaw, topicEntries);
+      if (followStepParsed) {
+        followTopicId = followStepParsed.topicId;
+      } else {
+        const matchedFollowUp = findTopicEntry(topicEntries, followUp);
+        if (!matchedFollowUp) {
+          console.log(`Topic "${followUpRaw}" not found. Available: ${availableTopicIds}`);
+          continue;
+        }
+        followTopicId = matchedFollowUp[0];
+      }
+      const followIndex = topicEntries.findIndex(([id]) => id === followTopicId);
+      if (followIndex < 0) {
+        console.log(`Topic "${followTopicId}" not found in list.`);
         continue;
       }
-      const [followTopicId] = matchedFollowUp;
-      const followIndex = topicEntries.findIndex(([id]) => id === followTopicId);
+      if (followStepParsed) {
+        followTopicStepWindow = {
+          topicIndex: followIndex,
+          from1: followStepParsed.from1,
+          to1Inclusive: followStepParsed.to1Inclusive,
+        };
+      }
       logLine(`INTERACTIVE follow-up: running topic ${followTopicId}`);
       const sliceReuse = buildReusePlan(topicEntries, followIndex, followIndex + 1);
       let slicePlan = sliceReuse.planByCaptureId;
@@ -1672,7 +1844,7 @@ async function run() {
         slicePlan = mergeReusePlanDecisions(slicePlan, overlayDecisionsFollow);
       }
       const followCaptureState = { lastCapturedStepId: null };
-      await runTopicSlice(followIndex, followIndex + 1, slicePlan, followCaptureState);
+      await runTopicSlice(followIndex, followIndex + 1, slicePlan, followCaptureState, followTopicStepWindow);
       console.log(`Topic finished: ${followTopicId}`);
     }
   } finally {
