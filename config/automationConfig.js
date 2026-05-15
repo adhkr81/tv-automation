@@ -74,8 +74,10 @@ export const automationConfig = {
 
   runModes: {
     requireTopicInSingleMode: true,
-    runResetBeforeFirstTopic: true,
-    runResetBetweenTopics: true,
+    /** When true, runs `procedure.reset` before the first topic in a slice. Prefer `{ type: "procedure", mode: "reset" }` in steps when false. */
+    runResetBeforeFirstTopic: false,
+    /** When true, runs `procedure.reset` before each subsequent topic. Prefer inline `procedure` steps when false. */
+    runResetBetweenTopics: false,
   },
 
   topicPolicy: {

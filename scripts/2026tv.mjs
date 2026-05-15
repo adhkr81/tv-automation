@@ -1,7 +1,9 @@
 /**
- * Named navigation packs (`procedure.reset`, `procedure.foo`, …). Used for:
- * 1) Auto-run `procedure.reset` before topics when `shouldRunResetForTopic` applies.
- * 2) Inline `{ type: "procedure", mode: "<name>" }` runs `procedure.<name>` at that point.
+ * Named navigation packs (`procedure.reset`, `procedure.foo`, …). Use inline
+ * `{ type: "procedure", mode: "<name>" }` in topic steps where you want that pack to run.
+ *
+ * Optional: `runModes.runResetBeforeFirstTopic` / `runResetBetweenTopics` in automationConfig can still
+ * auto-run `procedure.reset` before topics (off by default).
  *
  * Legacy: `export const reset = { "0": { steps: [...] } }` is merged into `procedure.reset` when missing.
  */
