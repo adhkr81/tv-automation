@@ -106,6 +106,7 @@ You can define each step in one of two ways:
 - **`mode`** is required; if it is missing, the action is ignored.
 - Pack lookup is case-insensitive on the `procedure` object keys.
 - If no pack matches `mode`, the action is logged and skipped.
+- **Simulator editor:** In the topic **Automation** pane, **Reset pack** sits with **Capture screen** / **Skip capture** (or use **R** when the queue strip is focused); it appends `{ type: "procedure", mode: "reset" }` to the step’s stored TV command list, matching this directive for capture runs.
 
 ## Step-Level Options
 

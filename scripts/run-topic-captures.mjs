@@ -7,6 +7,7 @@ import { chromium } from "playwright";
 import samsungTvRemotePkg from "samsung-tv-remote";
 import { automationConfig } from "../config/automationConfig.js";
 import { loginAndWaitAuthenticated } from "../lib/loginFlow.js";
+import { filterTopicEntriesWithNonEmptySteps } from "../lib/topicEntriesFilter.js";
 
 dotenv.config();
 
@@ -65,6 +66,23 @@ function resolveTopicsFileName() {
   const rawValue = (cliArg?.slice("--topics=".length) || process.env.TOPICS_FILE || "2026tv").trim();
   if (!rawValue) return "2026tv.mjs";
   return rawValue.endsWith(".mjs") ? rawValue : `${rawValue}.mjs`;
+}
+
+/** @returns {"file" | "rtdb"} */
+function resolveInstructionsSource() {
+  const cliArg = process.argv.find((arg) => arg.startsWith("--source="));
+  const raw = (cliArg?.slice("--source=".length) || process.env.TOPICS_SOURCE || "file")
+    .trim()
+    .toLowerCase();
+  if (raw === "rtdb" || raw === "firebase") return "rtdb";
+  return "file";
+}
+
+function shouldWriteGeneratedTopics() {
+  return (
+    process.argv.includes("--write-topics") ||
+    (process.env.WRITE_TOPICS || "").trim() === "1"
+  );
 }
 
 /** Optional JSON overlay: same shape as a saved `reuse-plan.json` (`decisions` object). */
@@ -146,6 +164,7 @@ function resolveRunDirForTopicsFile(topicsFileName) {
 
 async function loadTopicInstructions() {
   const topicsFileName = resolveTopicsFileName();
+  const source = resolveInstructionsSource();
   const topicsFilePath = path.join(process.cwd(), "scripts", topicsFileName);
   if (!fs.existsSync(topicsFilePath)) {
     throw new Error(
@@ -154,12 +173,10 @@ async function loadTopicInstructions() {
   }
 
   const topicsModule = await import(`./${topicsFileName}`);
-  const loadedTopics = topicsModule.topics;
-  const hasProcedureExport = topicsModule.procedure != null && typeof topicsModule.procedure === "object";
-  const hasLegacyResetExport = topicsModule.reset != null && typeof topicsModule.reset === "object";
-  if (!loadedTopics || typeof loadedTopics !== "object") {
-    throw new Error(`Topics file "${topicsFileName}" must export a "topics" object.`);
-  }
+  const hasProcedureExport =
+    topicsModule.procedure != null && typeof topicsModule.procedure === "object";
+  const hasLegacyResetExport =
+    topicsModule.reset != null && typeof topicsModule.reset === "object";
   if (!hasProcedureExport && !hasLegacyResetExport) {
     throw new Error(
       `Topics file "${topicsFileName}" must export a "procedure" object (or legacy "reset" object).`,
@@ -168,7 +185,23 @@ async function loadTopicInstructions() {
 
   const loadedProcedure = normalizeProcedureExport(topicsModule);
 
-  return { topicsFileName, loadedTopics, loadedProcedure };
+  let loadedTopics;
+  if (source === "rtdb") {
+    const { fetchTvAutomationTopics, writeGeneratedTopicsModule } = await import(
+      "../lib/rtdbTvAutomation.js"
+    );
+    loadedTopics = await fetchTvAutomationTopics();
+    if (shouldWriteGeneratedTopics()) {
+      writeGeneratedTopicsModule(topicsFileName, loadedTopics);
+    }
+  } else {
+    loadedTopics = topicsModule.topics;
+    if (!loadedTopics || typeof loadedTopics !== "object") {
+      throw new Error(`Topics file "${topicsFileName}" must export a "topics" object.`);
+    }
+  }
+
+  return { topicsFileName, loadedTopics, loadedProcedure, source };
 }
 
 /** Merge `export const procedure` with legacy `reset["0"]` → `procedure.reset` when absent. */
@@ -1466,7 +1499,7 @@ function planOnlyMode() {
 
 /** Build a full reuse plan from topic definitions and write it under the capture output dir (no browser). */
 async function writeReusePlanToCaptureDir() {
-  const { topicsFileName, loadedTopics, loadedProcedure } = await loadTopicInstructions();
+  const { topicsFileName, loadedTopics, loadedProcedure, source } = await loadTopicInstructions();
   topics = loadedTopics;
   procedure = loadedProcedure;
   const runDirTarget = resolveRunDirForTopicsFile(topicsFileName);
@@ -1476,11 +1509,14 @@ async function writeReusePlanToCaptureDir() {
     ? topics.map((topic, idx) => [topic.id || String(idx + 1), topic])
     : Object.entries(topics);
   const allowedTopicSet = getAllowedTopicSet();
-  const topicEntries = allowedTopicSet
+  let topicEntries = allowedTopicSet
     ? allTopicEntries.filter(([id]) => allowedTopicSet.has(String(id).toLowerCase()))
     : allTopicEntries;
+  topicEntries = filterTopicEntriesWithNonEmptySteps(topicEntries);
   if (topicEntries.length === 0) {
-    throw new Error("No topics are available after applying topicPolicy.allowTopicIds.");
+    throw new Error(
+      "No topics with automation steps are available after applying topicPolicy.allowTopicIds.",
+    );
   }
 
   const startIndex = 0;
@@ -1513,7 +1549,9 @@ async function writeReusePlanToCaptureDir() {
     topicStatsMerged,
     planByCaptureId,
   });
-  console.log(`Instructions file: scripts/${topicsFileName}`);
+  console.log(
+    `Instructions: scripts/${topicsFileName}${source === "rtdb" ? " (procedure) + RTDB (topics)" : ""}`,
+  );
   console.log(`Wrote reuse plan: ${outPath}`);
   console.log(
     `${reusableMerged}/${totalsMerged.captureEligibleSteps} capture points marked reusable (plan-driven).`,
@@ -1572,22 +1610,28 @@ async function run() {
   });
 
   try {
-    const { topicsFileName, loadedTopics, loadedProcedure } = await loadTopicInstructions();
+    const { topicsFileName, loadedTopics, loadedProcedure, source } =
+      await loadTopicInstructions();
     topics = loadedTopics;
     procedure = loadedProcedure;
     runDir = resolveRunDirForTopicsFile(topicsFileName);
     fs.mkdirSync(runDir, { recursive: true });
-    console.log(`Instructions file: scripts/${topicsFileName}`);
+    console.log(
+      `Instructions: scripts/${topicsFileName}${source === "rtdb" ? " (procedure) + RTDB (topics)" : " (topics + procedure)"}`,
+    );
     console.log(`Capture output dir: ${runDir}`);
     const allTopicEntries = Array.isArray(topics)
       ? topics.map((topic, idx) => [topic.id || String(idx + 1), topic])
       : Object.entries(topics);
     const allowedTopicSet = getAllowedTopicSet();
-    const topicEntries = allowedTopicSet
+    let topicEntries = allowedTopicSet
       ? allTopicEntries.filter(([id]) => allowedTopicSet.has(String(id).toLowerCase()))
       : allTopicEntries;
+    topicEntries = filterTopicEntriesWithNonEmptySteps(topicEntries);
     if (topicEntries.length === 0) {
-      throw new Error("No topics are available after applying topicPolicy.allowTopicIds.");
+      throw new Error(
+        "No topics with automation steps are available after applying topicPolicy.allowTopicIds.",
+      );
     }
     const availableTopicIds = topicEntries.map(([id]) => id).join(", ");
     let startTopicId = String(topicPolicy.defaultStartTopic || "").trim();
