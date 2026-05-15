@@ -1750,24 +1750,16 @@ async function run() {
       reusableSteps: reusableMerged,
       newCaptureSteps: reusePlan.totals.captureEligibleSteps - reusableMerged,
     };
-    const topicStatsMerged = topicStatsForPlan(topicEntries, startIndex, endExclusive, planByCaptureId);
 
-    const reusePlanPath = path.join(runLogDir, REUSE_PLAN_FILENAME);
-    writeReusePlanJsonFile(reusePlanPath, {
-      generatedAt: reusePlan.generatedAt,
-      reusePlanOverlayPath,
-      totalsMerged,
-      topicStatsMerged,
-      planByCaptureId,
-    });
     logLine(
       `REUSE PLAN: topics=${totalsMerged.topics}, steps=${totalsMerged.totalSteps}, capturePoints=${totalsMerged.captureEligibleSteps}, reusable=${totalsMerged.reusableSteps}, newCaptures=${totalsMerged.newCaptureSteps}`,
     );
-    logLine(`REUSE PLAN FILE: ${path.relative(process.cwd(), reusePlanPath)}`);
+    if (reusePlanOverlayPath) {
+      logLine(`REUSE PLAN OVERLAY: ${path.relative(process.cwd(), reusePlanOverlayPath)}`);
+    }
     console.log(
       `Reuse plan ready: ${totalsMerged.reusableSteps}/${totalsMerged.captureEligibleSteps} capture points will reuse (plan-driven).`,
     );
-    console.log(`Reuse plan saved: ${reusePlanPath}`);
 
     const captureState = { lastCapturedStepId: null };
 
