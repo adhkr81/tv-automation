@@ -1,34 +1,9 @@
-# Dependencies
 node_modules/
-
-# Test results
-test-results/
-playwright-report/
-playwright/.auth/
-
-# Environment variables
 .env
-.env.local
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Captures (screenshots from topic runs)
-captures/
-
-# Logs
+.cache/
 logs/
-*.log
-npm-debug.log*
-
-
-# Generated keyTracker JS files
-key-tracker-js-output/*.js
+captures/
+secrets/
+db-service-account.json
+*-service-account.json
+*.topics.generated.mjs
