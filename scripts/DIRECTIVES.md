@@ -2,15 +2,59 @@
 
 This document describes the directives supported by `run-topic-captures.mjs` when reading a topics file in `scripts/` (for example `2026tv.mjs` or `2025tv.mjs`).
 
+## Topics file exports
+
+Each topics module must export:
+
+- **`topics`** — required object of topic definitions (see below).
+- **`procedure`** — object of named procedure packs, **or** a legacy **`reset`** object (see [Backward Compatibility](#backward-compatibility)).
+
+## Procedure packs
+
+Topics modules export named navigation packs on **`export const procedure`**. Each key is a pack name (for example `reset`, `foo`). Each pack is a small navigation script with the same **`steps`** shape as a topic: an array of steps, where each step is either an action array or an `{ actions: [...], ... }` object (see [Step Shapes](#step-shapes)).
+
+```js
+export const procedure = {
+  reset: {
+    steps: [
+      [{ type: "remote", key: "KEY_HOME" }, { type: "wait", ms: 800 }],
+      // …more steps…
+    ],
+  },
+};
+```
+
+### How packs run (inline vs optional auto `reset`)
+
+**Normal case — you choose where a pack runs:** add `{ type: "procedure", mode: "<name>" }` to topic `steps` (see [4) Procedure directive](#4-procedure-directive)). Example: `{ type: "procedure", mode: "reset" }` runs `procedure.reset` at that point. `mode` is matched case-insensitively against `procedure` keys. Sub-actions are logged with IDs like `…-proc-<mode>-1`, ….
+
+**Optional — runner injects `procedure.reset` before topics:** If `procedure.reset` exists (including after [legacy merge](#backward-compatibility)), you can turn on automatic runs in `config/automationConfig.js` → **`runModes`**:
+
+| Flag | When `true` |
+| --- | --- |
+| `runResetBeforeFirstTopic` | Runs `procedure.reset` once before the **first** topic in the slice (`procedure-reset-1`, … in logs). |
+| `runResetBetweenTopics` | Runs `procedure.reset` before **each later** topic in the slice. |
+
+In this repo both default to **`false`**: no injected reset; define `{ type: "procedure", mode: "reset" }` (or other packs) in steps where you need them. A `procedure.reset` pack may still include `capture` actions; they behave like captures in any other step.
+
+### Nested `procedure` inside a pack
+
+If a pack was **started by** an inline `{ type: "procedure", ... }` action, nested `procedure` actions inside that pack are **skipped** (avoids recursion). **Automatic** pre-topic `procedure.reset` (when enabled via `runModes`) does **not** use that restriction, so nested `procedure` steps inside the reset pack **do** run if present.
+
+### Reuse plans
+
+Fingerprints prefix each topic’s chain with `reset:0` or `reset:1` from whether **automatic** `procedure.reset` runs before that topic for that slice. Changing `runModes` or removing the reset pack can change reuse matching. Inline `{ type: "procedure", mode: "reset" }` is **not** that prefix; it is expanded into the ordered remote / wait / procedure signatures like other actions.
+
 ## Step Shapes
 
 You can define each step in one of two ways:
 
 1. **Array step (recommended, consistent style)**
    - A list of action/directive objects.
+   - Captures are only taken where a `capture` directive appears.
 2. **Object step**
    - `{ actions: [...], ...options }`
-   - Useful when you want explicit step-level options.
+   - Useful when you want default retry/reuse options for capture directives inside `actions`.
 
 ## Action/Directive Types (inside `actions` or array step)
 
@@ -33,22 +77,35 @@ You can define each step in one of two ways:
 ### 3) Capture directive
 
 ```js
+{ type: "capture" }
 { type: "capture", mode: "screen" }
 { type: "capture", mode: "skip" }
 { type: "capture", mode: "reuse", reuseImage: "previous" }
 { type: "capture", mode: "reuse", reuseImage: "1-3" }
 ```
 
-- `mode: "screen"`: force a fresh live RM screen capture for this step.
-  - Aliases: `mode: "live"` and `mode: "now"`.
+- Missing `mode`: same as `mode: "screen"` (fresh RM graphic capture at this point).
+- `mode: "screen"`: fresh live RM screen capture at this point.
   - Use it as its own step when you want to capture the current screen between remote actions.
-- `mode: "skip"`: skip capture for this step.
+- `mode: "skip"`: explicitly skip capture at this point. This is mostly useful for generated files; plain remote/wait arrays do not capture by default.
 - `mode: "reuse"`: copy an existing saved image instead of live popup/blob capture.
   - `reuseImage: "previous"`: reuse the most recently saved capture in this run.
   - `reuseImage: "<topic>-<step>"`: reuse from a specific step ID (example: `"1-3"`).
 - Optional for reuse:
   - `skipLiveCapture: true` (default for reuse): if reuse fails, do **not** attempt live capture.
   - `skipLiveCapture: false`: if reuse fails, fallback to live capture.
+
+### 4) Procedure directive
+
+```js
+{ type: "procedure", mode: "reset" }
+{ type: "procedure", mode: "foo" }
+```
+
+- Runs **`procedure[mode]`** at this point in the topic (see [Procedure packs](#procedure-packs)).
+- **`mode`** is required; if it is missing, the action is ignored.
+- Pack lookup is case-insensitive on the `procedure` object keys.
+- If no pack matches `mode`, the action is logged and skipped.
 
 ## Step-Level Options
 
@@ -59,27 +116,28 @@ These can be declared in object steps, and for array steps some can also be decl
   actions: [...],
   captureRetries: 4,
   retryWaitMs: 800,
-  skipCapture: false,
   reuseImage: "previous",
   skipLiveCapture: true
 }
 ```
 
-- `captureRetries`: max live capture attempts for this step.
+- `captureRetries`: default max live capture attempts for capture directives in this step.
 - `retryWaitMs`: wait time between retry attempts.
-- `skipCapture`: skip capture for this step.
 - `reuseImage`: manual reuse source (`"previous"` or `"topic-step"`).
 - `skipLiveCapture`: when reuse fails, skip live capture (`true`) or fallback (`false`).
 
 ## Priority / Behavior Notes
 
-- Capture directives are parsed from step arrays and converted into step-level behavior. Capture happens after the step's remote/wait actions finish.
-- `mode: "screen"` forces live capture and bypasses automatic capture reuse for that step.
+- There is no automatic capture at the end of a step.
+- Capture directives run inline. Actions listed after a capture directive still run after that capture finishes.
+- Only `screen`, `reuse`, and `skip` are supported. Any other `mode` string is treated as `screen`.
 - If `reuseImage` is set, reuse is attempted first.
-- If reuse succeeds, step capture is completed without blob/popup capture.
+- If reuse succeeds, the capture point is completed without blob/popup capture.
 - If reuse fails:
   - with `skipLiveCapture: true` -> live capture is skipped.
   - with `skipLiveCapture: false` -> live capture is attempted.
+- If a step has more than one saving capture directive, the first uses `<topic>-<step>` and later captures use `<topic>-<step>-captureN`.
+- Reuse plans and the `reset:0` / `reset:1` fingerprint prefix: see [Reuse plans](#reuse-plans) (under [Procedure packs](#procedure-packs)).
 
 ## Examples
 
@@ -91,23 +149,14 @@ These can be declared in object steps, and for array steps some can also be decl
 ]
 ```
 
-### Press Back/Return, then capture the resulting screen
+### Press Back/Return, capture, then continue
 
 ```js
 [
   { type: "remote", key: "KEY_RETURN" },
   { type: "wait", ms: 700 },
-  { type: "capture", mode: "screen" }
-]
-```
-
-### Skip capture in an array step
-
-```js
-[
-  { type: "remote", key: "KEY_HOME" },
-  { type: "wait", ms: 700 },
-  { type: "capture", mode: "skip" }
+  { type: "capture", mode: "screen" },
+  { type: "remote", key: "KEY_DOWN" }
 ]
 ```
 
@@ -127,10 +176,34 @@ These can be declared in object steps, and for array steps some can also be decl
 ]
 ```
 
+### Run the `reset` pack when you need it (mid-topic)
+
+```js
+[
+  { type: "remote", key: "KEY_MENU" },
+  { type: "procedure", mode: "reset" },
+  { type: "capture", mode: "screen" }
+]
+```
+
+### Start a topic from the shared reset pack
+
+Use the first step (or any step) to run the named `reset` pack before the rest of the topic:
+
+```js
+[
+  { type: "procedure", mode: "reset" },
+  { type: "remote", key: "KEY_HOME" },
+  { type: "capture", mode: "screen" }
+]
+```
+
 ## Backward Compatibility
 
-- Topic-level `skipCapture` is still supported.
-- Existing steps with only `remote`/`wait` continue to work as before.
+- Topics files must export **`procedure`** or legacy **`reset`**. If only `reset` is exported, it must define **`reset["0"]`** as an object with `steps`; that object becomes **`procedure.reset`**. If both exist, **`procedure.reset`** wins and legacy `reset["0"]` is only used when `procedure.reset` is absent.
+- Existing steps with only `remote`/`wait` still run, but they no longer capture automatically.
+- Step-level retry/reuse options are still read by object steps and used as defaults for capture directives inside `actions`.
+- Older topic files that used `mode: "auto"`, `"live"`, `"now"`, or `"capture"` should be updated to `screen`, `reuse`, or `skip`; unknown values are treated as `screen` (there is no fingerprint-based automatic file reuse anymore).
 
 ## Available Samsung Remote Buttons
 

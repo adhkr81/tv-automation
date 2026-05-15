@@ -58,8 +58,8 @@ export const automationConfig = {
       "2026tv": "2026tv",
       "2025tv": "2025tv",
     },
-    // Reused captures skip popup/download time; this wait keeps step timing stable.
-    reuseStepSettleMs: 1200,
+    /** Pause after each file reuse (copy); skips popup timing so the TV can catch up. Set 0 to disable. */
+    reusePauseAfterReuseMs: 2000,
     retryAttempts: 3,
     /** Per popup-open: in-page blob/canvas/fetch retries before giving up this invocation. */
     popupExtractAttempts: 6,
@@ -74,8 +74,10 @@ export const automationConfig = {
 
   runModes: {
     requireTopicInSingleMode: true,
-    runResetBeforeFirstTopic: true,
-    runResetBetweenTopics: true,
+    /** When true, runs `procedure.reset` before the first topic in a slice. Prefer `{ type: "procedure", mode: "reset" }` in steps when false. */
+    runResetBeforeFirstTopic: false,
+    /** When true, runs `procedure.reset` before each subsequent topic. Prefer inline `procedure` steps when false. */
+    runResetBetweenTopics: false,
   },
 
   topicPolicy: {
