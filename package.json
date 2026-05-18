@@ -4,10 +4,10 @@
   "type": "module",
   "description": "Samsung RMUS remote control automation and OSD capture tool",
   "scripts": {
-    "capture": "node scripts/run-topic-captures.mjs --topics=2026tv",
-    "capture:2025": "node scripts/run-topic-captures.mjs --topics=2025tv",
-    "reuse-plan": "node scripts/run-topic-captures.mjs --topics=2026tv --write-reuse-plan-only",
-    "reuse-plan:2025": "node scripts/run-topic-captures.mjs --topics=2025tv --write-reuse-plan-only"
+    "capture": "node scripts/run-topic-captures.mjs --topics=2026tv --source=rtdb",
+    "capture:local": "node scripts/run-topic-captures.mjs --topics=2026tv",
+    "reuse-plan:": "node scripts/run-topic-captures.mjs --topics=2026tv --source=rtdb --write-reuse-plan-only",
+    "reuse-plan:local": "node scripts/run-topic-captures.mjs --topics=2026tv --write-reuse-plan-only"
   },
   "keywords": [],
   "author": "",
@@ -15,6 +15,7 @@
   "dependencies": {
     "@playwright/test": "^1.58.0",
     "dotenv": "^17.4.2",
+    "firebase-admin": "^12.5.0",
     "playwright": "^1.58.0",
     "samsung-tv-remote": "^3.0.5"
   }
